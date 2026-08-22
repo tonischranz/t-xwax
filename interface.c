@@ -1748,18 +1748,18 @@ static bool handle_key(SDL_Keycode key, Uint16 mod)
             }
         }
     } 
-    else if (key >= SDLK_KP1 && key <= SDLK_KP9) {
+    else if (key >= SDLK_KP_1 && key <= SDLK_KP_9) {
         size_t d;
         int label;
 
-        label = key - SDLK_KP1;
+        label = key - SDLK_KP_1;
 
         if (mod & KMOD_LCTRL) 
             d = 0;
         else if (mod & KMOD_RCTRL) 
             d = 1;
         else {
-            d = (key - SDLK_KP1) % 3;
+            d = (key - SDLK_KP_1) % 3;
             label = label / 3;
         }
 
@@ -1797,7 +1797,7 @@ static bool handle_key(SDL_Keycode key, Uint16 mod)
     return false;
 }
 
-static void handle_keyup(SDLKey key, SDLMod mod)
+static void handle_keyup(SDL_Keycode key, SDL_Keymod mod)
 {
     if (key == SDLK_LCTRL || key == SDLK_RCTRL) {
         (&deck[0])->cue_mode = CUE_ACTIVE;
