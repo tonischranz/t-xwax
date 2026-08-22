@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -20,11 +20,11 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/poll.h>
 
 #include "list.h"
 #include "mutex.h"

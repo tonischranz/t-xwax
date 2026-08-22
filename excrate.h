@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -20,7 +20,7 @@
 #ifndef EXCRATE_H
 #define EXCRATE_H
 
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/types.h>
 
 #include "external.h"

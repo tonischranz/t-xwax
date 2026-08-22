@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -40,7 +40,7 @@ struct selector {
     struct observer on_activity, on_refresh, on_addition;
 
     size_t search_len;
-    char search[256];
+    char search[256]; /* not unicode, one byte is one character */
     struct match match; /* the compiled search, kept in-sync */
 
     struct event changed;

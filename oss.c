@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -18,12 +18,12 @@
  */
 
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
 #include <sys/soundcard.h>
 
 #include "oss.h"
@@ -157,7 +157,7 @@ static struct device_ops oss_ops = {
 
 
 int oss_init(struct device *dv, const char *filename, unsigned int rate,
-	     unsigned short buffers, unsigned short fragment)
+             unsigned short buffers, unsigned short fragment)
 {
     int p, fd;
     struct oss *oss;

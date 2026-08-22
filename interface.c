@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -17,6 +17,7 @@
  *
  */
 
+#define _GNU_SOURCE /* strdupa() */
 #include <assert.h>
 #include <errno.h>
 #include <iconv.h>
@@ -51,29 +52,29 @@
 /* Font definitions */
 
 #define FONT "DejaVuSans.ttf"
-#define FONT_SIZE 10
-#define FONT_SPACE 15
+#define FONT_SIZE 16
+#define FONT_SPACE 24
 
 #define EM_FONT "DejaVuSans-Oblique.ttf"
 
 #define BIG_FONT "DejaVuSans-Bold.ttf"
-#define BIG_FONT_SIZE 14
-#define BIG_FONT_SPACE 19
+#define BIG_FONT_SIZE 22
+#define BIG_FONT_SPACE 30
 
 #define CLOCK_FONT FONT
-#define CLOCK_FONT_SIZE 32
+#define CLOCK_FONT_SIZE 52
 
 #define DECI_FONT FONT
-#define DECI_FONT_SIZE 20
+#define DECI_FONT_SIZE 32
 
 #define DETAIL_FONT "DejaVuSansMono-Bold.ttf"
-#define DETAIL_FONT_SIZE 9
-#define DETAIL_FONT_SPACE 12
+#define DETAIL_FONT_SIZE 15
+#define DETAIL_FONT_SPACE 19
 
 /* Screen size (pixels) */
 
-#define DEFAULT_WIDTH 960
-#define DEFAULT_HEIGHT 720
+#define DEFAULT_WIDTH 1280
+#define DEFAULT_HEIGHT 960
 
 /* Relationship between pixels and screen units */
 
@@ -81,17 +82,17 @@
 
 /* Dimensions in our own screen units */
 
-#define BORDER 12
-#define SPACER 8
-#define HALF_SPACER 4
+#define BORDER 18
+#define SPACER 14
+#define HALF_SPACER 7
 
-#define CURSOR_WIDTH 4
+#define CURSOR_WIDTH 6
 
-#define PLAYER_HEIGHT 213
-#define OVERVIEW_HEIGHT 16
+#define PLAYER_HEIGHT 340
+#define OVERVIEW_HEIGHT 26
 
-#define LIBRARY_MIN_WIDTH 64
-#define LIBRARY_MIN_HEIGHT 64
+#define LIBRARY_MIN_WIDTH 102
+#define LIBRARY_MIN_HEIGHT 102
 
 #define DEFAULT_METER_SCALE 8
 
@@ -100,18 +101,18 @@
 #define SEARCH_HEIGHT (FONT_SPACE)
 #define STATUS_HEIGHT (DETAIL_FONT_SPACE)
 
-#define BPM_WIDTH 32
-#define SORT_WIDTH 21
-#define RESULTS_ARTIST_WIDTH 200
+#define BPM_WIDTH 52
+#define SORT_WIDTH 33
+#define RESULTS_ARTIST_WIDTH 320
 
-#define TOKEN_SPACE 2
+#define TOKEN_SPACE 3
 
-#define CLOCKS_WIDTH 160
+#define CLOCKS_WIDTH 256
 
 #define SPINNER_SIZE (CLOCK_FONT_SIZE * 2 - 6)
 #define SCOPE_SIZE (CLOCK_FONT_SIZE * 2 - 6)
 
-#define SCROLLBAR_SIZE 10
+#define SCROLLBAR_SIZE 16
 
 #define METER_WARNING_TIME 20 /* time in seconds for "red waveform" warning */
 
@@ -128,15 +129,19 @@
 #define EVENT_STATUS (SDL_USEREVENT + 2)
 #define EVENT_SELECTOR (SDL_USEREVENT + 3)
 
+/* Types of redraw event */
+
+#define REDRAW_BACKGROUND  0x1
+#define REDRAW_DECKS       0x2
+#define REDRAW_STATUS      0x4
+#define REDRAW_LIBRARY     0x8
+
 /* Macro functions */
 
 #define MIN(x,y) ((x)<(y)?(x):(y))
-#define SQ(x) ((x)*(x))
 
 #define LOCK(sf) if (SDL_MUSTLOCK(sf)) SDL_LockSurface(sf)
 #define UNLOCK(sf) if (SDL_MUSTLOCK(sf)) SDL_UnlockSurface(sf)
-#define UPDATE(sf, rect) SDL_UpdateRect(sf, (rect)->x, (rect)->y, \
-                                        (rect)->w, (rect)->h)
 
 /* List of directories to use as search path for fonts. */
 
@@ -170,12 +175,11 @@ static SDL_Color background_col = {0, 0, 0, 255},
 
 static unsigned short *spinner_angle, spinner_size;
 
-static int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT,
-    meter_scale = DEFAULT_METER_SCALE;
-static Uint32 video_flags = SDL_RESIZABLE;
+static int meter_scale = DEFAULT_METER_SCALE;
 static float scale = DEFAULT_SCALE;
 static iconv_t utf;
 static pthread_t ph;
+SDL_Window *window;
 static struct selector selector;
 static struct observer on_status, on_selector;
 
@@ -314,6 +318,9 @@ static TTF_Font* open_font(const char *name, int size) {
             font = TTF_OpenFont(buf, pt);
             if (!font)
                 fprintf(stderr, "Font error: %s\n", TTF_GetError());
+
+            TTF_SetFontHinting(font, TTF_HINTING_NONE);
+
             return font; /* or NULL */
         }
 
@@ -631,7 +638,7 @@ static void draw_bpm(SDL_Surface *surface, const struct rect *rect, double bpm,
     f -= floor(f);
     h = f * 360.0; /* degrees */
 
-    draw_token(surface, rect, buf, text_col, hsv(h, 1.0, 0.3), bg_col);
+    draw_token(surface, rect, buf, text_col, hsv(h, 1.0, 0.5), bg_col);
 }
 
 /*
@@ -702,18 +709,23 @@ static void draw_clock(SDL_Surface *surface, const struct rect *rect, int t,
 static void draw_scope(SDL_Surface *surface, const struct rect *rect,
                        struct timecoder *tc)
 {
-    int r, c, v, mid;
+    int r, c, v;
+    unsigned short size, mid;
     Uint8 *p;
 
-    mid = tc->mon_size / 2;
+    assert(rect->w == tc->scope_size);
+    assert(rect->h == tc->scope_size);
+    size = rect->w;
 
-    for (r = 0; r < tc->mon_size; r++) {
-        for (c = 0; c < tc->mon_size; c++) {
+    mid = size / 2;
+
+    for (r = 0; r < size; r++) {
+        for (c = 0; c < size; c++) {
             p = surface->pixels
                 + (rect->y + r) * surface->pitch
                 + (rect->x + c) * surface->format->BytesPerPixel;
 
-            v = tc->mon[r * tc->mon_size + c];
+            v = tc->scope[r * size + c];
 
             if ((r == mid || c == mid) && v < 64)
                 v = 64;
@@ -1511,34 +1523,110 @@ static void draw_library(SDL_Surface *surface, const struct rect *rect,
     }
 }
 
+static SDL_Rect to_sdl_rect(struct rect ours)
+{
+    return (SDL_Rect) {
+        .x = ours.x,
+        .y = ours.y,
+        .w = ours.w,
+        .h = ours.h,
+    };
+}
+
+/*
+ * Draw the interface, using a bitmask to optimise which areas
+ */
+
+static void draw(SDL_Surface *surface, unsigned int redraw)
+{
+    SDL_Rect areas[3], *damaged = areas;
+    struct rect whole, rworkspace, rplayers, rlibrary, rstatus, rtmp;
+
+    /* Split the display into the various areas. If an area is too
+     * small, abandon any actions to happen in that area. */
+
+    whole = rect(0, 0, surface->w, surface->h, scale);
+    rworkspace = shrink(rect(0, 0, surface->w, surface->h, scale), BORDER);
+
+    split(rworkspace, from_bottom(STATUS_HEIGHT, SPACER), &rtmp, &rstatus);
+    if (rtmp.h < 128 || rtmp.w < 0) {
+        rtmp = rworkspace;
+        redraw &= ~REDRAW_STATUS;
+    }
+
+    split(rtmp, from_top(PLAYER_HEIGHT, SPACER), &rplayers, &rlibrary);
+    if (rlibrary.h < LIBRARY_MIN_HEIGHT || rlibrary.w < LIBRARY_MIN_WIDTH) {
+        rplayers = rtmp;
+        redraw &= ~REDRAW_LIBRARY;
+    }
+
+    if (rplayers.h < 0 || rplayers.w < 0)
+        redraw &= ~REDRAW_DECKS;
+
+    if (!redraw)
+        return;
+
+    LOCK(surface);
+
+    if (redraw & REDRAW_BACKGROUND)
+        draw_rect(surface, &whole, background_col);
+
+    if (redraw & REDRAW_LIBRARY) {
+        draw_library(surface, &rlibrary, &selector);
+        *damaged++ = to_sdl_rect(rlibrary);
+    }
+
+    if (redraw & REDRAW_STATUS) {
+        draw_status(surface, &rstatus);
+        *damaged++ = to_sdl_rect(rstatus);
+    }
+
+    if (redraw & REDRAW_DECKS) {
+        draw_decks(surface, &rplayers, deck, ndeck, meter_scale);
+        *damaged++ = to_sdl_rect(rplayers);
+    }
+
+    UNLOCK(surface);
+
+    /* These calls cannot be checked for errors, because
+     * errors happen when the window has been resized */
+
+    if (redraw & REDRAW_BACKGROUND)
+        (void)SDL_UpdateWindowSurface(window);
+    else
+        (void)SDL_UpdateWindowSurfaceRects(window, areas, damaged - areas);
+}
+
+/*
+ * Text "input" from SDL is a unicode string
+ */
+
+static void handle_text(const char *input)
+{
+    char k = input[0];
+
+    switch (k) {
+    case '.':
+    case ' ':
+    case 'a' ... 'z':
+    case 'A' ... 'Z':
+    case '0' ... '9':
+        selector_search_refine(&selector, k);
+    }
+}
+
 /*
  * Handle a single key event
  *
  * Return: true if the selector needs to be redrawn, otherwise false
  */
 
-static bool handle_key(SDLKey key, SDLMod mod)
+static bool handle_key(SDL_Keycode key, Uint16 mod)
 {
     struct selector *sel = &selector;
 
-    if (key >= SDLK_a && key <= SDLK_z) {
-        selector_search_refine(sel, (key - SDLK_a) + 'a');
-        return true;
-
-    } else if (key >= SDLK_0 && key <= SDLK_9) {
-        selector_search_refine(sel, (key - SDLK_0) + '0');
-        return true;
-
-    } else if (key == SDLK_SPACE) {
-        selector_search_refine(sel, ' ');
-        return true;
-
-    } else if (key == SDLK_BACKSPACE) {
+    if (key == SDLK_BACKSPACE) {
         selector_search_expand(sel);
-        return true;
-
-    } else if (key == SDLK_PERIOD) {
-        selector_search_refine(sel, '.');
         return true;
 
     } else if (key == SDLK_HOME) {
@@ -1612,7 +1700,7 @@ static bool handle_key(SDLKey key, SDLMod mod)
         size_t d;
 
         /* Handle the function key press in groups of four --
-	 * F1-F4 (deck 0), F5-F8 (deck 1) etc. */
+         * F1-F4 (deck 0), F5-F8 (deck 1) etc. */
 
         d = (key - SDLK_F1) / 4;
 
@@ -1722,19 +1810,18 @@ static void handle_keyup(SDLKey key, SDLMod mod)
  * Action on size change event on the main window
  */
 
-static SDL_Surface* set_size(int w, int h, struct rect *r)
+static SDL_Surface* set_size(void)
 {
     SDL_Surface *surface;
 
-    surface = SDL_SetVideoMode(w, h, 32, video_flags);
+    surface = SDL_GetWindowSurface(window);
     if (surface == NULL) {
         fprintf(stderr, "%s\n", SDL_GetError());
         return NULL;
     }
 
-    *r = shrink(rect(0, 0, w, h, scale), BORDER);
-
-    fprintf(stderr, "New interface size is %dx%d.\n", w, h);
+    fprintf(stderr, "New interface size is %dx%d.\n",
+            surface->w, surface->h);
 
     return surface;
 }
@@ -1743,7 +1830,7 @@ static void push_event(int t)
 {
     SDL_Event e;
 
-    if (!SDL_PeepEvents(&e, 1, SDL_PEEKEVENT, SDL_EVENTMASK(t))) {
+    if (!SDL_PeepEvents(&e, 1, SDL_PEEKEVENT, t, t)) {
         e.type = t;
         if (SDL_PushEvent(&e) == -1)
             abort();
@@ -1774,27 +1861,91 @@ static void defer_selector_redraw(struct observer *o, void *x)
     push_event(EVENT_SELECTOR);
 }
 
+static void sync_status_from_selector(void)
+{
+    const char *text = "No search results found";
+    struct record *record;
+
+    record = selector_current(&selector);
+
+    if (record)
+        text = record->pathname;
+
+    status_set(STATUS_VERBOSE, text);
+}
+
+/*
+ * Handle one SDL event
+ *
+ * Update the provided variables.
+ *
+ * Return: false if asked to exit the main loop, otherwise true
+ */
+
+static bool handle_sdl_event(SDL_Event *event,
+                             unsigned int *redraw, SDL_Surface **surface)
+{
+    switch(event->type) {
+    case SDL_QUIT: /* user request to quit application; eg. window close */
+        if (rig_quit() == -1)
+            return -1;
+        break;
+
+    case SDL_WINDOWEVENT:
+        switch (event->window.event) {
+        case SDL_WINDOWEVENT_RESIZED:
+            *surface = set_size();
+            if (!surface)
+                return false;
+
+            /* fall-through */
+        case SDL_WINDOWEVENT_EXPOSED:
+            *redraw = (unsigned)-1;
+            break;
+        }
+
+        break;
+
+    case EVENT_TICKER:
+        *redraw |= REDRAW_DECKS;
+        break;
+
+    case EVENT_QUIT: /* internal request to finish this thread */
+        return false;
+
+    case EVENT_STATUS:
+        *redraw |= REDRAW_STATUS;
+        break;
+
+    case EVENT_SELECTOR:
+        *redraw |= REDRAW_LIBRARY;
+        break;
+
+    case SDL_TEXTINPUT:
+        handle_text(event->text.text);
+        sync_status_from_selector();
+        break;
+
+    case SDL_KEYDOWN:
+        if (handle_key(event->key.keysym.sym, event->key.keysym.mod))
+            sync_status_from_selector();
+    }
+
+    return true;
+}
+
 /*
  * The SDL interface thread
  */
 
 static int interface_main(void)
 {
-    bool library_update, decks_update, status_update;
-
-    SDL_Event event;
     SDL_TimerID timer;
     SDL_Surface *surface;
 
-    struct rect rworkspace, rplayers, rlibrary, rstatus, rtmp;
-
-    surface = set_size(width, height, &rworkspace);
+    surface = set_size();
     if (!surface)
         return -1;
-
-    decks_update = true;
-    status_update = true;
-    library_update = true;
 
     /* The final action is to add the timer which triggers refresh */
 
@@ -1803,6 +1954,8 @@ static int interface_main(void)
     rig_lock();
 
     for (;;) {
+        unsigned int redraw = 0;
+        SDL_Event event;
 
         rig_unlock();
 
@@ -1811,106 +1964,14 @@ static int interface_main(void)
 
         rig_lock();
 
-        switch(event.type) {
-        case SDL_QUIT: /* user request to quit application; eg. window close */
-            if (rig_quit() == -1)
-                return -1;
-            break;
+        do {
+            if (!handle_sdl_event(&event, &redraw, &surface))
+                goto finish;
 
-        case SDL_VIDEORESIZE:
-            surface = set_size(event.resize.w, event.resize.h, &rworkspace);
-            if (!surface)
-                return -1;
+        } while (SDL_PollEvent(&event) > 0);
 
-            library_update = true;
-            decks_update = true;
-            status_update = true;
-
-            break;
-
-        case EVENT_TICKER:
-            decks_update = true;
-            break;
-
-        case EVENT_QUIT: /* internal request to finish this thread */
-            goto finish;
-
-        case EVENT_STATUS:
-            status_update = true;
-            break;
-
-        case EVENT_SELECTOR:
-            library_update = true;
-            break;
-
-        case SDL_KEYDOWN:
-            if (handle_key(event.key.keysym.sym, event.key.keysym.mod))
-            {
-                struct record *r;
-
-                r = selector_current(&selector);
-                if (r != NULL) {
-                    status_set(STATUS_VERBOSE, r->pathname);
-                } else {
-                    status_set(STATUS_VERBOSE, "No search results found");
-                }
-            }
-            break;
-        case SDL_KEYUP:
-            handle_keyup(event.key.keysym.sym, event.key.keysym.mod);
-            break;
-        } /* switch(event.type) */
-
-        /* Split the display into the various areas. If an area is too
-         * small, abandon any actions to happen in that area. */
-
-        split(rworkspace, from_bottom(STATUS_HEIGHT, SPACER), &rtmp, &rstatus);
-        if (rtmp.h < 128 || rtmp.w < 0) {
-            rtmp = rworkspace;
-            status_update = false;
-        }
-
-        split(rtmp, from_top(PLAYER_HEIGHT, SPACER), &rplayers, &rlibrary);
-        if (rlibrary.h < LIBRARY_MIN_HEIGHT || rlibrary.w < LIBRARY_MIN_WIDTH) {
-            rplayers = rtmp;
-            library_update = false;
-        }
-
-        if (rplayers.h < 0 || rplayers.w < 0)
-            decks_update = false;
-
-        if (!library_update && !decks_update && !status_update)
-            continue;
-
-        LOCK(surface);
-
-        if (library_update)
-            draw_library(surface, &rlibrary, &selector);
-
-        if (status_update)
-            draw_status(surface, &rstatus);
-
-        if (decks_update)
-            draw_decks(surface, &rplayers, deck, ndeck, meter_scale);
-
-        UNLOCK(surface);
-
-        if (library_update) {
-            UPDATE(surface, &rlibrary);
-            library_update = false;
-        }
-
-        if (status_update) {
-            UPDATE(surface, &rstatus);
-            status_update = false;
-        }
-
-        if (decks_update) {
-            UPDATE(surface, &rplayers);
-            decks_update = false;
-        }
-
-    } /* main loop */
+        draw(surface, redraw);
+    }
 
  finish:
     rig_unlock();
@@ -1927,7 +1988,7 @@ static void* launch(void *p)
 }
 
 /*
- * Parse and action the given geometry string
+ * Parse the given geometry string into the given variables
  *
  * Geometry string includes size, position and scale. The format is
  * "[<n>x<n>][+<n>+<n>][/<f>]". Some examples:
@@ -1936,19 +1997,22 @@ static void* launch(void *p)
  *   +10+10
  *   960x720+10+10
  *   /1.6
- *   1920x1200@1.6
+ *   1920x1200/1.6
  *
  * Return: -1 if string could not be actioned, otherwise 0
  */
 
-static int parse_geometry(const char *s)
+static int parse_geometry(const char *s,
+                          int *x, int *y,
+                          int *width, int *height,
+                          float *scale)
 {
-    int n, x, y, len;
+    int n, len;
     char buf[128];
 
     /* The %n in format strings is not a token, see scanf(3) man page */
 
-    n = sscanf(s, "%[0-9]x%d%n", buf, &height, &len);
+    n = sscanf(s, "%[0-9]x%d%n", buf, height, &len);
     switch (n) {
     case EOF:
         return 0;
@@ -1956,41 +2020,34 @@ static int parse_geometry(const char *s)
         break;
     case 2:
         /* we used a format to prevent parsing the '+' in the next block */
-        width = atoi(buf);
+        *width = atoi(buf);
         s += len;
         break;
     default:
         return -1;
     }
 
-    n = sscanf(s, "+%d+%d%n", &x, &y, &len);
+    n = sscanf(s, "+%d+%d%n", x, y, &len);
     switch (n) {
     case EOF:
         return 0;
     case 0:
         break;
     case 2:
-        /* Not a desirable way to get geometry information to
-         * SDL, but it seems to be the only way */
-
-        sprintf(buf, "SDL_VIDEO_WINDOW_POS=%d,%d", x, y);
-        if (putenv(buf) != 0)
-            return -1;
-
         s += len;
         break;
     default:
         return -1;
     }
 
-    n = sscanf(s, "/%f%n", &scale, &len);
+    n = sscanf(s, "/%f%n", scale, &len);
     switch (n) {
     case EOF:
         return 0;
     case 0:
         break;
     case 1:
-        if (scale <= 0.0)
+        if (*scale <= 0.0)
             return -1;
         s += len;
         break;
@@ -2010,11 +2067,6 @@ static int parse_geometry(const char *s)
 
 static void cleanup()
 {
-    size_t n;
-
-    for (n = 0; n < ndeck; n++)
-        timecoder_monitor_clear(&deck[n].timecoder);
-
     clear_spinner();
     ignore(&on_status);
     ignore(&on_selector);
@@ -2034,15 +2086,20 @@ static void cleanup()
 
 int interface_start(struct library *lib, const char *geo, bool decor)
 {
+    int x = SDL_WINDOWPOS_UNDEFINED,
+        y = SDL_WINDOWPOS_UNDEFINED,
+        width = DEFAULT_WIDTH,
+        height = DEFAULT_HEIGHT;
     size_t n;
+    Uint32 window_flags = SDL_WINDOW_RESIZABLE;
 
-    if (parse_geometry(geo) == -1) {
+    if (parse_geometry(geo, &x, &y, &width, &height, &scale) == -1) {
         fprintf(stderr, "Window geometry ('%s') is not valid.\n", geo);
         return -1;
     }
 
     if (!decor)
-        video_flags |= SDL_NOFRAME;
+        window_flags |= SDL_WINDOW_BORDERLESS;
 
     /*
      * Start allocating resources
@@ -2072,13 +2129,16 @@ int interface_start(struct library *lib, const char *geo, bool decor)
 
     fprintf(stderr, "Initialising SDL...\n");
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) == -1) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
         fprintf(stderr, "%s\n", SDL_GetError());
         goto fail_fonts;
     }
 
-    SDL_WM_SetCaption(banner, NULL);
-    SDL_EnableKeyRepeat(SDL_DEFAULT_REPEAT_DELAY, SDL_DEFAULT_REPEAT_INTERVAL);
+    window = SDL_CreateWindow(banner, x, y, width, height, window_flags);
+    if (!window) {
+        fprintf(stderr, "%s\n", SDL_GetError());
+        goto fail_sdl;
+    }
 
     /*
      * Character translations; internally UTF8 is used
@@ -2091,14 +2151,14 @@ int interface_start(struct library *lib, const char *geo, bool decor)
     }
 
     /*
-     * Timecode monitors
+     * Visual display of timecode input audio
      */
 
     if (init_spinner(zoom(SPINNER_SIZE)) == -1)
         goto fail_sdl;
 
     for (n = 0; n < ndeck; n++) {
-        if (timecoder_monitor_init(&deck[n].timecoder, zoom(SCOPE_SIZE)) == -1)
+        if (timecoder_scope(&deck[n].timecoder, zoom(SCOPE_SIZE)) == -1)
             not_implemented();
     }
 
