@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -24,8 +24,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h> /* mlockall() */
-
-#include <SDL.h> /* may override main() */
 
 #include "alsa.h"
 #include "controller.h"
@@ -57,7 +55,7 @@
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
 
 char *banner = "xwax " VERSION \
-    " (C) Copyright 2021 Mark Hills <mark@xwax.org>";
+    " (C) Copyright 2026 Mark Hills <mark@xwax.org>";
 
 size_t ndeck;
 struct deck deck[3];
@@ -74,58 +72,57 @@ static struct timecode_def *timecode;
 
 static void usage(FILE *fd)
 {
-    fprintf(fd, "Usage: xwax [<options>]\n\n");
+    fprintf(fd, "Usage: xwax [<options>] [-- <path> ...]\n\n");
 
     fprintf(fd, "Program-wide options:\n"
-      "  -k             Lock real-time memory into RAM\n"
-      "  -q <n>         Real-time priority (0 for no priority, default %d)\n"
-      "  -g <s>         Set display geometry (see man page)\n"
-      "  --no-decor     Request a window with no decorations\n"
-      "  -h             Display this message to stdout and exit\n\n",
+      "  --lock-ram          Lock real-time memory into RAM\n"
+      "  --rtprio <n>        Real-time priority (0 for no priority, default %d)\n"
+      "  --geometry <s>      Set display geometry (see man page)\n"
+      "  --no-decor          Request a window with no decorations\n"
+      "  -h, --help          Display this message to stdout and exit\n\n",
       DEFAULT_PRIORITY);
 
     fprintf(fd, "Music library options:\n"
-      "  -l <path>      Location to scan for audio tracks\n"
-      "  -s <program>   Library scanner (default '%s')\n\n",
+      "  -l, --crate <path>  Location to scan for audio tracks\n"
+      "  --scan <program>    Library scanner (default '%s')\n\n",
       DEFAULT_SCANNER);
 
     fprintf(fd, "Deck options:\n"
-      "  -t <name>      Timecode name\n"
-      "  -33            Use timecode at 33.3RPM (default)\n"
-      "  -45            Use timecode at 45RPM\n"
-      "  -c             Protect against certain operations while playing\n"
-      "  -u             Allow all operations when playing\n"
-      "  --line         Line level signal (default)\n"
-      "  --phono        Tolerate cartridge level signal ('software pre-amp')\n"
-      "  -i <program>   Importer (default '%s')\n"
-      "  --dummy        Build a dummy deck with no audio device\n\n",
+      "  --timecode <name>   Timecode name\n"
+      "  --33                Use timecode at 33.3RPM (default)\n"
+      "  --45                Use timecode at 45RPM\n"
+      "  --[no-]protect      Protect against certain operations while playing\n"
+      "  --line              Line level signal (default)\n"
+      "  --phono             Tolerate cartridge level signal ('software pre-amp')\n"
+      "  --import <program>  Track importer (default '%s')\n"
+      "  --dummy             Build a dummy deck with no audio device\n\n",
       DEFAULT_IMPORTER);
 
 #ifdef WITH_OSS
     fprintf(fd, "OSS device options:\n"
-      "  -d <device>    Build a deck connected to OSS audio device\n"
-      "  --rate <hz>    Sample rate (default 48000Hz)\n"
-      "  -b <n>         Number of buffers (default %d)\n"
-      "  -f <n>         Buffer size to request (2^n bytes, default %d)\n\n",
+      "  --oss <device>      Build a deck connected to OSS audio device\n"
+      "  --rate <hz>         Sample rate (default 48000Hz)\n"
+      "  --oss-buffers <n>   Number of buffers (default %d)\n"
+      "  --oss-fragment <n>  Buffer size to request (2^n bytes, default %d)\n\n",
       DEFAULT_OSS_BUFFERS, DEFAULT_OSS_FRAGMENT);
 #endif
 
 #ifdef WITH_ALSA
     fprintf(fd, "ALSA device options:\n"
-      "  -a <device>    Build a deck connected to ALSA audio device\n"
-      "  --rate <hz>    Sample rate (default is automatic)\n"
-      "  --buffer <n>   Buffer size (default %d samples)\n\n",
+      "  --alsa <device>     Build a deck connected to ALSA audio device\n"
+      "  --rate <hz>         Sample rate (default is automatic)\n"
+      "  --buffer <n>        Buffer size (default %d samples)\n\n",
       DEFAULT_ALSA_BUFFER);
 #endif
 
 #ifdef WITH_JACK
     fprintf(fd, "JACK device options:\n"
-      "  -j <name>      Create a JACK deck with the given name\n\n");
+      "  --jack <name>       Create a JACK deck with the given name\n\n");
 #endif
 
 #ifdef WITH_ALSA
     fprintf(fd, "MIDI control:\n"
-      "  --dicer <dev>   Novation Dicer\n\n");
+      "  --dicer <device>    Novation Dicer\n\n");
 #endif
 
     fprintf(fd,
@@ -138,6 +135,15 @@ static void usage(FILE *fd)
       "  traktor_a, traktor_b,\n"
       "  mixvibes_v2, mixvibes_7inch\n\n"
       "See the xwax(1) man page for full information and examples.\n");
+}
+
+static void deprecated(const char **arg, const char *old, const char *new)
+{
+    if (strcmp(*arg, old))
+        return;
+
+    fprintf(stderr, "Command line flag '%s' is deprecated; using '%s'\n", old, new);
+    *arg = new;
 }
 
 static struct device* start_deck(const char *desc)
@@ -182,7 +188,7 @@ static int commit_deck(void)
     return 0;
 }
 
-int main(int argc, char *argv[])
+int main(int argc, const char *argv[])
 {
     int rc = -1, n, priority;
     const char *scanner, *geo;
@@ -260,13 +266,30 @@ int main(int argc, char *argv[])
     argc--;
 
     while (argc > 0) {
+        deprecated(&argv[0], "-33", "--33");
+        deprecated(&argv[0], "-45", "--45");
+        deprecated(&argv[0], "-a", "--alsa");
+        deprecated(&argv[0], "-c", "--protect");
+        deprecated(&argv[0], "-d", "--oss");
+        deprecated(&argv[0], "-g", "--geometry");
+        deprecated(&argv[0], "-i", "--import");
+        deprecated(&argv[0], "-j", "--jack");
+        deprecated(&argv[0], "-k", "--lock-ram");
+        deprecated(&argv[0], "-q", "--rtprio");
+        deprecated(&argv[0], "-s", "--scan");
+        deprecated(&argv[0], "-t", "--timecode");
+        deprecated(&argv[0], "-u", "--no-protect");
+#ifdef WITH_OSS
+        deprecated(&argv[0], "-b", "--oss-buffers");
+        deprecated(&argv[0], "-f", "--oss-fragment");
+#endif
 
-        if (!strcmp(argv[0], "-h")) {
+        if (!strcmp(argv[0], "-h") || !strcmp(argv[0], "--help")) {
             usage(stdout);
             return 0;
 
 #ifdef WITH_OSS
-        } else if (!strcmp(argv[0], "-f")) {
+        } else if (!strcmp(argv[0], "--oss-fragment")) {
 
             /* Set fragment size for subsequent devices */
 
@@ -293,18 +316,18 @@ int main(int argc, char *argv[])
             argv += 2;
             argc -= 2;
 
-        } else if (!strcmp(argv[0], "-b")) {
+        } else if (!strcmp(argv[0], "--oss-buffers")) {
 
             /* Set number of buffers for subsequent devices */
 
             if (argc < 2) {
-                fprintf(stderr, "-b requires an integer argument.\n");
+                fprintf(stderr, "%s requires an integer argument.\n", argv[0]);
                 return -1;
             }
 
             oss_buffers = strtol(argv[1], &endptr, 10);
             if (*endptr != '\0') {
-                fprintf(stderr, "-b requires an integer argument.\n");
+                fprintf(stderr, "%s requires an integer argument.\n", argv[0]);
                 return -1;
             }
 
@@ -313,7 +336,10 @@ int main(int argc, char *argv[])
 #endif
 
 #if defined WITH_OSS || WITH_ALSA
-        } else if (!strcmp(argv[0], "--rate")) {
+        } else if (!strcmp(argv[0], "--rate") || !strcmp(argv[0], "-r")) {
+
+            if (!strcmp(argv[0], "-r"))
+                fprintf(stderr, "-r will be removed in future, use --rate instead\n");
 
             /* Set sample rate for subsequence devices */
 
@@ -338,6 +364,10 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef WITH_ALSA
+        } else if (!strcmp(argv[0], "-m")) {
+            fprintf(stderr, "-m is no longer available, check the man page for --buffer in samples\n");
+            return -1;
+
         } else if (!strcmp(argv[0], "--buffer")) {
 
             /* Set size of ALSA buffer for subsequence devices */
@@ -357,9 +387,9 @@ int main(int argc, char *argv[])
             argc -= 2;
 #endif
 
-        } else if (!strcmp(argv[0], "-d") || !strcmp(argv[0], "-a") ||
-		  !strcmp(argv[0], "-j"))
-	{
+        } else if (!strcmp(argv[0], "--oss") || !strcmp(argv[0], "--alsa") ||
+                  !strcmp(argv[0], "--jack"))
+        {
             int r;
             struct device *device;
 
@@ -378,10 +408,10 @@ int main(int argc, char *argv[])
             /* Work out which device type we are using, and initialise
              * an appropriate device. */
 
-            switch(argv[0][1]) {
+            switch(argv[0][2]) {
 
 #ifdef WITH_OSS
-            case 'd':
+            case 'o':
                 r = oss_init(device, argv[1], rate ? rate : 48000,
                              oss_buffers, oss_fragment);
                 break;
@@ -397,8 +427,8 @@ int main(int argc, char *argv[])
                 break;
 #endif
             default:
-                fprintf(stderr, "Device type is not supported by this "
-                        "distribution of xwax.\n");
+                fprintf(stderr, "Device '%s' is not supported by this "
+                        "distribution of xwax.\n", argv[0]);
                 return -1;
             }
 
@@ -424,12 +454,12 @@ int main(int argc, char *argv[])
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-t")) {
+        } else if (!strcmp(argv[0], "--timecode")) {
 
             /* Set the timecode definition to use */
 
             if (argc < 2) {
-                fprintf(stderr, "-t requires a name as an argument.\n");
+                fprintf(stderr, "%s requires a name as an argument.\n", argv[0]);
                 return -1;
             }
 
@@ -442,28 +472,28 @@ int main(int argc, char *argv[])
             argv += 2;
             argc -= 2;
 
-        } else if (!strcmp(argv[0], "-33")) {
+        } else if (!strcmp(argv[0], "--33")) {
 
             speed = 1.0;
 
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-45")) {
+        } else if (!strcmp(argv[0], "--45")) {
 
             speed = 1.35;
 
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-c")) {
+        } else if (!strcmp(argv[0], "--protect")) {
 
             protect = true;
 
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-u")) {
+        } else if (!strcmp(argv[0], "--no-protect")) {
 
             protect = false;
 
@@ -484,7 +514,7 @@ int main(int argc, char *argv[])
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-k")) {
+        } else if (!strcmp(argv[0], "--lock-ram")) {
 
             use_mlock = true;
             track_use_mlock();
@@ -492,16 +522,16 @@ int main(int argc, char *argv[])
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-q")) {
+        } else if (!strcmp(argv[0], "--rtprio")) {
 
             if (argc < 2) {
-                fprintf(stderr, "-q requires an integer argument.\n");
+                fprintf(stderr, "--rtprio requires an integer argument.\n");
                 return -1;
             }
 
             priority = strtol(argv[1], &endptr, 10);
             if (*endptr != '\0') {
-                fprintf(stderr, "-q requires an integer argument.\n");
+                fprintf(stderr, "--rtprio requires an integer argument.\n");
                 return -1;
             }
 
@@ -514,10 +544,10 @@ int main(int argc, char *argv[])
             argv += 2;
             argc -= 2;
 
-        } else if (!strcmp(argv[0], "-g")) {
+        } else if (!strcmp(argv[0], "--geometry")) {
 
             if (argc < 2) {
-                fprintf(stderr, "-g requires an argument.\n");
+                fprintf(stderr, "%s requires an argument.\n", argv[0]);
                 return -1;
             }
 
@@ -533,13 +563,13 @@ int main(int argc, char *argv[])
             argv++;
             argc--;
 
-        } else if (!strcmp(argv[0], "-i")) {
+        } else if (!strcmp(argv[0], "--import")) {
 
             /* Importer script for subsequent decks */
 
             if (argc < 2) {
-                fprintf(stderr, "-i requires an executable path "
-                        "as an argument.\n");
+                fprintf(stderr, "%s requires an executable path "
+                        "as an argument.\n", argv[0]);
                 return -1;
             }
 
@@ -548,13 +578,13 @@ int main(int argc, char *argv[])
             argv += 2;
             argc -= 2;
 
-        } else if (!strcmp(argv[0], "-s")) {
+        } else if (!strcmp(argv[0], "--scan")) {
 
             /* Scan script for subsequent libraries */
 
             if (argc < 2) {
-                fprintf(stderr, "-s requires an executable path "
-                        "as an argument.\n");
+                fprintf(stderr, "%s requires an executable path "
+                        "as an argument.\n", argv[0]);
                 return -1;
             }
 
@@ -563,12 +593,12 @@ int main(int argc, char *argv[])
             argv += 2;
             argc -= 2;
 
-        } else if (!strcmp(argv[0], "-l")) {
+        } else if (!strcmp(argv[0], "-l") || !strcmp(argv[0], "--crate")) {
 
             /* Load in a music library */
 
             if (argc < 2) {
-                fprintf(stderr, "-l requires a pathname as an argument.\n");
+                fprintf(stderr, "%s requires a pathname as an argument.\n", argv[0]);
                 return -1;
             }
 
@@ -604,10 +634,24 @@ int main(int argc, char *argv[])
             argc -= 2;
 #endif
 
+        } else if (!strcmp(argv[0], "--")) {
+            argv++;
+            argc--;
+
+            break;
+
         } else {
             fprintf(stderr, "'%s' argument is unknown; try -h.\n", argv[0]);
             return -1;
         }
+    }
+
+    while (argc > 0) {
+        if (library_import(&library, scanner, argv[0]) == -1)
+            return -1;
+
+        argv++;
+        argc--;
     }
 
 #ifdef WITH_ALSA
@@ -635,6 +679,15 @@ int main(int argc, char *argv[])
 
     if (interface_start(&library, geo, decor) == -1)
         goto out_rt;
+
+    for (n = 0; n < ndeck; n++) {
+        struct timecoder *tc = &deck[n].timecoder;
+
+        if (use_mlock && mlock(tc->scope, tc->scope_len) == -1) {
+            perror("mlock");
+            goto out_interface;
+        }
+    }
 
     if (rig_main() == -1)
         goto out_interface;

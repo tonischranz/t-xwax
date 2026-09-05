@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -20,9 +20,9 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
+#include <poll.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <sys/poll.h>
 #include <sys/types.h>
 
 struct deck;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -368,7 +368,7 @@ static int sync_to_timecode(struct player *pl)
     /* If we can read an absolute time from the timecode, then use it */
 
     if (timecode == -1) {
-	pl->target_position = TARGET_UNKNOWN;
+        pl->target_position = TARGET_UNKNOWN;
     } else {
         tcpos = (double)timecode / timecoder_get_resolution(pl->timecoder);
         pl->target_position = tcpos + pl->pitch * when;

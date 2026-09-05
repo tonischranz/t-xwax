@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Mark Hills <mark@xwax.org>
+ * Copyright (C) 2026 Mark Hills <mark@xwax.org>
  *
  * This file is part of "xwax".
  *
@@ -20,8 +20,8 @@
 #ifndef DEVICE_H
 #define DEVICE_H
 
+#include <poll.h>
 #include <stdbool.h>
-#include <sys/poll.h>
 #include <sys/types.h>
 
 #define DEVICE_CHANNELS 2

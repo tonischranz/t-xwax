@@ -1,9 +1,10 @@
+'\" t
 .TH XWAX "1"
 .SH NAME
 xwax \- Digital vinyl on Linux
 .SH SYNOPSIS
 .B xwax
-[\fIoptions\fR]
+[\fIoptions\fR] [-- \fIpath\fR ...]
 .SH DESCRIPTION
 .P
 xwax is vinyl emulation software for Linux. It allows DJs and
@@ -18,31 +19,32 @@ See the
 .B EXAMPLES
 below.
 .TP
-.B \-l \fIpath\fR
-Scan the music library or playlist at the given path.
+.B \-l, \-\-crate \fIpath\fR
+Scan for tracks or playlist at the given path. Tracks are grouped into
+a crate in the music library. Paths can also be given at the end of the
+command, after a
+.B \-\-
+argument.
 .TP
-.B \-t \fIname\fR
-Use the named timecode for subsequent decks. See \-h for a list of
+.B \-\-timecode \fIname\fR
+Use the named timecode for subsequent decks. See
+.B \-\-help
+for a list of
 valid timecodes. You will need the corresponding timecode signal on
 vinyl to control playback.
 .TP
-.B \-33
+.B \-\-33
 Set the reference playback speed for subsequent decks to 33 and one
 third revolutions per minute. This is the default.
 .TP
-.B \-45
+.B \-\-45
 Set the reference playback speed for subsequent decks to 45
 revolutions per minute.
 .TP
-.B \-c
-Protect subsequent decks against certain operations during
-playback.
-.TP
-.B \-u
-Allow all operations on a deck during playback. This is the inverse
-of the
-.B \-c
-option, and is the default.
+.B \-\-[no\-]protect
+Protect against loading new tracks or resetting the start of the track
+if the deck is playing. Applies to subsequent decks, and the default is
+off.
 .TP
 .B \-\-phono
 Adjust the noise thresholds of subsequent decks to tolerate a
@@ -57,28 +59,33 @@ This reverses the effect of the
 .B \-\-phono
 option, and is the default.
 .TP
-.B \-i \fIpath\fR
-Use the given importer executable for subsequent decks.
+.B \-\-import \fIpath\fR
+Execute the given program to load tracks for playing. The program
+outputs a stream of signed, little-endian, 16-bit, 2 channel audio on
+standard output.
 .TP
-.B \-s \fIpath\fR
-Use the given scanner executable to scan subsequent music libraries.
+.B \-\-scan \fIpath\fR
+Execute the given program to scan music libraries. Applies to
+subsequent use of the
+.B \-\-crate
+flag.
 .TP
 .B \-\-dummy
 Create a deck which is not connected to any audio device, used
 for testing.
 .TP
-.B \-k
+.B \-\-lock\-ram
 Lock into RAM any memory required for real-time use.
 This includes audio tracks held in memory which can be large.
 Use
 .B ulimit \-l
 to raise the kernel's memory limit to allow this.
 .TP
-.B \-q \fIn\fR
+.B \-\-rtprio \fIn\fR
 Change the real-time priority of the process. A priority of 0 gives
 the process no priority, and is used for testing only.
 .TP
-.B \-g [\fIn\fRx\fIn\fR][+\fIn\fR+\fIn\fR][/\fIf\fR]
+.B \-\-geometry [\fIn\fRx\fIn\fR][+\fIn\fR+\fIn\fR][/\fIf\fR]
 Change the geometry of the display in size, position and scale (zoom)
 respectively.
 The size and position is passed
@@ -90,17 +97,17 @@ See the
 Request to the window manager to create a 'frameless' window which
 does not have the regular controls such as title bars and buttons.
 This can be useful in conjunction with the
-.B \-g
-flag for dedicated xwax installations.
+.B \-\-geometry
+flag for dedicated xwax appliances.
 .TP
-.B \-h
+.B \-h, \-\-help
 Display the help message and default values.
 .SH "ALSA DEVICE OPTIONS"
 .P
 The following options are available only when xwax is compiled with
 ALSA support.
 .TP
-.B \-a \fIdevice\fR
+.B \-\-alsa \fIdevice\fR
 Create a deck which uses the given ALSA device (eg. plughw:0).
 .TP
 .B \-\-rate \fIhz\fR
@@ -120,7 +127,7 @@ to the console.
 The following options are available only when xwax is compiled with
 JACK support.
 .TP
-.B \-j \fIname\fR
+.B \-\-jack \fIname\fR
 Create a deck which connects to JACK and registers under the given
 name.
 .P
@@ -131,18 +138,20 @@ rate given in the global JACK configuration.
 The following options are available only when xwax is compiled with
 OSS support.
 .TP
-.B \-d \fIpathname\fR
+.B \-\-oss \fIpathname\fR
 Create a deck which uses the given OSS device (eg. /dev/dsp).
 .TP
 .B \-\-rate \fIhz\fR
 Set the sample rate for subsequent decks. The default for OSS devices
 is 48000Hz.
 .TP
-.B \-b \fIn\fR
-Set the number of OSS buffers for subsequent decks.
+.B \-\-oss\-buffers \fIn\fR
+Set the number of buffers used by the OSS device. Applies to
+subsequent decks.
 .TP
-.B \-f \fIn\fR
-Set the OSS buffer size (2^n bytes).
+.B \-\-oss\-fragment \fIn\fR
+Set the size of a buffer used by the OSS device. The actual buffer is
+2^n bytes. Applies to subsequent decks.
 .SH HARDWARE CONTROLLER OPTIONS
 .P
 The following options are available only when xwax is compiled
@@ -202,7 +211,7 @@ C-F3	C-F7	C-F11	Cycle between available timecodes
 .TE
 .P
 The "available timecodes" are those which have been the subject of any
-.B \-t
+.B \-\-timecode
 flag on the command line.
 .P
 Audio display controls:
@@ -231,67 +240,80 @@ set.
 2-deck setup using one directory of music and OSS devices:
 .sp
 .RS
-xwax \-l ~/music \-d /dev/dsp \-d /dev/dsp1
+xwax \-\-crate ~/music \-\-oss /dev/dsp \-\-oss /dev/dsp1
 .RE
 .P
 As above, but using ALSA devices:
 .sp
 .RS
-xwax \-l ~/music \-a hw:0 \-a hw:1
+xwax \-\-crate ~/music \-\-alsa hw:0 \-\-alsa hw:1
 .RE
 .P
 2-deck setup using a different timecode on each deck:
 .sp
 .RS
-xwax \-l ~/music \-t serato_2a \-a hw:0 \-t mixvibes_v2 \-a hw:1
+xwax \-\-crate ~/music \-\-timecode serato_2a \-\-alsa hw:0 \-\-timecode mixvibes_v2 \-\-alsa hw:1
 .RE
 .P
 As above, but with the second deck at 45 RPM:
 .sp
 .RS
-xwax \-l ~/music \-t serato_2a \-a hw:0 \-t mixvibes_v2 \-45 \-a hw:1
+xwax \-\-crate ~/music \-\-timecode serato_2a \-\-alsa hw:0 \-\-timecode mixvibes_v2 \-\-45 \-\-alsa hw:1
 .RE
 .P
 Default to the same timecode, but allow switching at runtime:
 .sp
 .RS
-xwax \-l ~/music \-t serato_2a \-t mixvibes_v2 \-a hw:0 \-a hw:1
+xwax \-\-crate ~/music \-\-timecode serato_2a \-\-timecode mixvibes_v2 \-\-alsa hw:0 \-\-alsa hw:1
 .RE
 .P
 3-deck setup with the third deck at a higher sample rate:
 .sp
 .RS
-xwax \-l ~/music \-\-rate 48000 \-a hw:0 \-a hw:1 \-\-rate 96000 \-a hw:2
+xwax \-\-crate ~/music \-\-rate 48000 \-\-alsa hw:0 \-\-alsa hw:1 \-\-rate 96000 \-\-alsa hw:2
 .RE
 .P
 Using all three device types simultaneously, one deck on each:
 .sp
 .RS
-xwax \-l ~/music \-a hw:0 \-d /dev/dsp1 \-j jack0
+xwax \-\-crate ~/music \-\-alsa hw:0 \-\-oss /dev/dsp1 \-j jack0
 .RE
 .P
 Scan multiple music libraries:
 .sp
 .RS
-xwax \-l ~/music \-l ~/sounds \-l ~/mixes \-a hw:0
+xwax \-\-crate ~/music \-\-crate ~/sounds \-\-crate ~/mixes \-\-alsa hw:0
+.RE
+.P
+A shorter form of the above which can also be easier to script:
+.sp
+.RS
+xwax \-\-alsa hw:0 -- ~/music ~/sounds ~/mixes
+.RE
+.P
+Load all subdirectories and put each one in its own crate, with support
+from the shell wildcard operator:
+.sp
+.RS
+xwax \-\-alsa hw:0 -- ~/music/*
 .RE
 .P
 Scan a second music library using a custom script:
 .sp
 .RS
-xwax \-l ~/music \-i ./custom-scan \-l ~/sounds \-a hw:0
+xwax \-\-crate ~/music \-\-scan ./custom-scan \-\-crate ~/sounds \-\-alsa hw:0
 .RE
 .P
 Control two decks with Dicer hardware:
 .sp
 .RS
-xwax \-\-dicer hw:Dicer \-a hw:0 \-a hw:1
+xwax \-\-dicer hw:Dicer \-\-alsa hw:0 \-\-alsa hw:1
 .RE
 .P
 Use a high resolution and enlarge the user interface:
 .sp
 .RS
-xwax -g 1920x1200/1.8 -a hw:0
+xwax \-\-geometry 1920x1200/1.8 \-\-alsa hw:0
 .RE
 .SH HOMEPAGE
 http://xwax.org/
