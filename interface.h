@@ -23,6 +23,8 @@
 #include "deck.h"
 #include "library.h"
 
+extern bool use_fft_visualizer;
+
 int interface_start(struct library *lib, const char *geo, bool decor);
 void interface_stop();
 

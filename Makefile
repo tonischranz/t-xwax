@@ -118,7 +118,7 @@ VERSION = $(shell ./mkversion)
 # Main binary
 
 xwax:		$(OBJS)
-xwax:		LDLIBS += $(SDL_LIBS) $(DEVICE_LIBS) -lm
+xwax:		LDLIBS += $(SDL_LIBS) $(DEVICE_LIBS) -lm -lfftw3
 xwax:		LDFLAGS += -pthread
 
 interface.o:	CFLAGS += $(SDL_CFLAGS)

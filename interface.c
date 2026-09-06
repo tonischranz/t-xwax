@@ -33,6 +33,7 @@
 
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <fftw3.h>
 
 #include "debug.h"
 #include "interface.h"
@@ -44,6 +45,7 @@
 #include "status.h"
 #include "timecoder.h"
 #include "xwax.h"
+
 
 /* Screen refresh time in milliseconds */
 
@@ -135,6 +137,14 @@
 #define REDRAW_DECKS       0x2
 #define REDRAW_STATUS      0x4
 #define REDRAW_LIBRARY     0x8
+
+#define FFT_SIZE 512
+#define MAX_DECKS 3
+#define HISTORY_WIDTH 2048
+
+struct fft_slice {
+    uint8_t r, g, b;
+};
 
 /* Macro functions */
 
@@ -1079,12 +1089,149 @@ static void draw_closeup(SDL_Surface *surface, const struct rect *rect,
     }
 }
 
+static struct fft_slice visual_history[MAX_DECKS][HISTORY_WIDTH];
+static int history_head[MAX_DECKS];
+static int last_pos[MAX_DECKS];
+static fftw_plan fft_plan = NULL;
+static double fft_in[FFT_SIZE];
+static fftw_complex fft_out[FFT_SIZE / 2 + 1];
+static bool history_initialized = false;
+
+/* Helper function to draw an alpha-transparent pixel overlay */
+static inline void draw_pixel_alpha(SDL_Surface *surface, int x, int y,
+                                    uint8_t r, uint8_t g, uint8_t b, uint8_t alpha)
+{
+    if (x < 0 || x >= surface->w || y < 0 || y >= surface->h)
+        return;
+
+    int bpp = surface->format->BytesPerPixel;
+    Uint8 *p = (Uint8 *)surface->pixels + y * surface->pitch + x * bpp;
+
+    p[0] = (Uint8)(((uint32_t)b * alpha + (uint32_t)p[0] * (255 - alpha)) / 255);
+    p[1] = (Uint8)(((uint32_t)g * alpha + (uint32_t)p[1] * (255 - alpha)) / 255);
+    p[2] = (Uint8)(((uint32_t)r * alpha + (uint32_t)p[2] * (255 - alpha)) / 255);
+}
+
+/* Helper function to draw a vertical column with alpha transparency */
+static inline void draw_column_alpha(SDL_Surface *surface, int x, int y, int h,
+                                     uint8_t r, uint8_t g, uint8_t b, uint8_t alpha)
+{
+    if (x < 0 || x >= surface->w || y >= surface->h)
+        return;
+
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (y + h > surface->h)
+        h = surface->h - y;
+
+    if (h <= 0)
+        return;
+
+    int bpp = surface->format->BytesPerPixel;
+    Uint8 *p = (Uint8 *)surface->pixels + y * surface->pitch + x * bpp;
+    int pitch = surface->pitch;
+
+    for (int row = 0; row < h; row++) {
+        p[0] = (Uint8)(((uint32_t)b * alpha + (uint32_t)p[0] * (255 - alpha)) / 255);
+        p[1] = (Uint8)(((uint32_t)g * alpha + (uint32_t)p[1] * (255 - alpha)) / 255);
+        p[2] = (Uint8)(((uint32_t)r * alpha + (uint32_t)p[2] * (255 - alpha)) / 255);
+        p += pitch;
+    }
+}
+
+/* Core FFT Processing and Rolling Render */
+static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *player,
+                                       struct cues *cues, const struct rect *rect, int d)
+{
+    int x, y, w, h;
+    struct track *tr;
+    int pos;
+
+    if (d < 0 || d >= MAX_DECKS)
+        return;
+
+    x = rect->x;
+    y = rect->y;
+    w = rect->w;
+    h = rect->h;
+
+    if (w <= 0 || h <= 0)
+        return;
+
+    draw_rect(surface, rect, background_col);
+
+    if (!history_initialized) {
+        fft_plan = fftw_plan_dft_r2c_1d(FFT_SIZE, fft_in, fft_out, FFTW_ESTIMATE);
+        memset(visual_history, 0, sizeof(visual_history));
+        for (int i = 0; i < MAX_DECKS; i++) {
+            history_head[i] = 0;
+            last_pos[i] = -1;
+        }
+        history_initialized = true;
+    }
+
+    tr = player ? player->track : NULL;
+    if (!tr || tr->length == 0)
+        return;
+
+    pos = (int)(player_get_elapsed(player) * tr->rate);
+
+    if (pos != last_pos[d]) {
+        int start = pos - FFT_SIZE / 2;
+        int half_fft = FFT_SIZE / 2;
+        double bass = 0.0, mid = 0.0, high = 0.0;
+
+        for (int i = 0; i < FFT_SIZE; i++) {
+            int s = start + i;
+            if (s >= 0 && s < (int)tr->length) {
+                signed short *pcm = track_get_sample(tr, s);
+                fft_in[i] = ((double)pcm[0] + (double)pcm[1]) / 65536.0;
+            } else {
+                fft_in[i] = 0.0;
+            }
+            fft_in[i] *= 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
+        }
+
+        fftw_execute(fft_plan);
+
+        for (int i = 1; i < half_fft; i++) {
+            double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
+            if (i < half_fft * 0.1)
+                bass += mag;
+            else if (i < half_fft * 0.5)
+                mid += mag;
+            else
+                high += mag;
+        }
+
+        visual_history[d][history_head[d]].r = (uint8_t)fmin(bass * 4.0, 255.0);
+        visual_history[d][history_head[d]].g = (uint8_t)fmin(mid * 3.0, 255.0);
+        visual_history[d][history_head[d]].b = (uint8_t)fmin(high * 4.0, 255.0);
+
+        history_head[d] = (history_head[d] + 1) % HISTORY_WIDTH;
+        last_pos[d] = pos;
+    }
+
+    /* Render timeline history transparently onto the surface */
+    for (int col = 0; col < w; col++) {
+        int hist_idx = (history_head[d] - 1 - col + HISTORY_WIDTH * 10) % HISTORY_WIDTH;
+        struct fft_slice slice = visual_history[d][hist_idx];
+
+        draw_column_alpha(surface, x + (w - 1 - col), y, h, slice.r, slice.g, slice.b, 140);
+    }
+
+    /* Draw playhead needle at current audio position (right edge) */
+    draw_column_alpha(surface, x + w - 1, y, h, needle_col.r, needle_col.g, needle_col.b, 230);
+}
+
 /*
  * Draw the audio meters for a deck
  */
 
 static void draw_meters(SDL_Surface *surface, const struct rect *rect,
-                        struct deck *d, int position, int scale)
+                        struct deck *d, int position, int scale, int deck_index)
 {
     struct rect overview, closeup;
     
@@ -1103,8 +1250,13 @@ static void draw_meters(SDL_Surface *surface, const struct rect *rect,
     else
         closeup = *rect;
 
-    draw_closeup(surface, &closeup, tr, c, position, scale);
+    if (use_fft_visualizer) {
+        draw_fft_scrolling_history(surface, pl, c, &closeup, deck_index);
+    } else {
+        draw_closeup(surface, &closeup, tr, c, position, scale);
+    }
 }
+
 
 /*
  * Draw the current playback status -- clocks, spinner and scope
@@ -1220,7 +1372,7 @@ static void draw_deck(SDL_Surface *surface, const struct rect *rect,
     else
         draw_deck_status(surface, &status, deck);
 
-    draw_meters(surface, &meters, deck, position, meter_scale);
+    draw_meters(surface, &meters, deck, position, meter_scale, d);
 }
 
 /*
@@ -2076,6 +2228,12 @@ static void cleanup()
     if (iconv_close(utf) == -1)
         abort();
 
+    if (fft_plan) {
+        fftw_destroy_plan(fft_plan);
+        fft_plan = NULL;
+    }
+    history_initialized = false;
+
     TTF_Quit();
     SDL_Quit();
 }
@@ -2194,6 +2352,7 @@ void interface_stop(void)
 
     if (pthread_join(ph, NULL) != 0)
         abort();
+
 
     cleanup();
 }

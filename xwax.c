@@ -70,6 +70,9 @@ static bool protect, phono;
 static const char *importer;
 static struct timecode_def *timecode;
 
+bool use_fft_visualizer = true;
+
+
 static void usage(FILE *fd)
 {
     fprintf(fd, "Usage: xwax [<options>] [-- <path> ...]\n\n");
@@ -79,6 +82,7 @@ static void usage(FILE *fd)
       "  --rtprio <n>        Real-time priority (0 for no priority, default %d)\n"
       "  --geometry <s>      Set display geometry (see man page)\n"
       "  --no-decor          Request a window with no decorations\n"
+      "  --[no-]fft          Enable/disable FFTW alpha overlay (default on)\n"
       "  -h, --help          Display this message to stdout and exit\n\n",
       DEFAULT_PRIORITY);
 
@@ -439,6 +443,18 @@ int main(int argc, const char *argv[])
 
             argv += 2;
             argc -= 2;
+
+        } else if (!strcmp(argv[0], "--fft")) {
+
+            use_fft_visualizer = true;
+            argv++;
+            argc--;
+
+        } else if (!strcmp(argv[0], "--no-fft")) {
+
+            use_fft_visualizer = false;
+            argv++;
+            argc--;
 
         } else if (!strcmp(argv[0], "--dummy")) {
 
