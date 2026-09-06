@@ -27,6 +27,7 @@ Options:
   --enable-alsa    Enable ALSA audio device
   --enable-jack    Enable JACK audio device
   --enable-oss     Enable OSS audio device
+  --enable-sdl     Enable SDL audio device
   --debug          Debug build
   --profile        Profile build
 EOF
@@ -38,6 +39,7 @@ PREFIX=
 ALSA=false
 JACK=false
 OSS=false
+SDL=false
 DEBUG=false
 PROFILE=false
 
@@ -55,6 +57,9 @@ while [ $# -ge 1 ]; do
 		;;
 	--enable-oss)
 		OSS=true
+		;;
+	--enable-sdl)
+		SDL=true
 		;;
 	--prefix)
 		if [ -z "$2" ]; then
@@ -103,6 +108,13 @@ if $OSS; then
 	echo "OSS = yes" >> $OUTPUT
 else
 	echo "OSS disabled"
+fi
+
+if $SDL; then
+	echo "SDL audio enabled"
+	echo "SDL = yes" >> $OUTPUT
+else
+	echo "SDL audio disabled"
 fi
 
 if $DEBUG && $PROFILE; then

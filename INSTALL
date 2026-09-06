@@ -13,6 +13,7 @@ Different audio device types are enabled using the compile options:
   ALSA=yes
   JACK=yes
   OSS=yes
+  SDL=yes
 
 If you are doing multiple builds you may like to put the compile
 options in a file named '.config' in the source directory instead of

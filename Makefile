@@ -99,6 +99,11 @@ OBJS += oss.o
 DEVICE_CPPFLAGS += -DWITH_OSS
 endif
 
+ifdef SDL
+OBJS += sdl.o
+DEVICE_CPPFLAGS += -DWITH_SDL
+endif
+
 TEST_OBJS = $(addsuffix .o,$(TESTS))
 DEPS = $(OBJS:.o=.d) $(TEST_OBJS:.o=.d) mktimecode.d
 
@@ -122,6 +127,7 @@ xwax:		LDLIBS += $(SDL_LIBS) $(DEVICE_LIBS) -lm
 xwax:		LDFLAGS += -pthread
 
 interface.o:	CFLAGS += $(SDL_CFLAGS)
+sdl.o:		CFLAGS += $(SDL_CFLAGS)
 
 xwax.o:		CFLAGS += $(SDL_CFLAGS)
 xwax.o:		CPPFLAGS += $(DEVICE_CPPFLAGS)

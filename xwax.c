@@ -41,6 +41,11 @@
 #include "track.h"
 #include "xwax.h"
 
+#ifdef WITH_SDL
+#include "sdl.h"
+#define DEFAULT_SDL_BUFFER 512 /* samples */
+#endif
+
 #define DEFAULT_OSS_BUFFERS 8
 #define DEFAULT_OSS_FRAGMENT 7
 
@@ -120,6 +125,16 @@ static void usage(FILE *fd)
       "  --jack <name>       Create a JACK deck with the given name\n\n");
 #endif
 
+#ifdef WITH_SDL
+    fprintf(fd, "SDL audio device options:\n"
+      "  --sdl <device>      Build a deck connected to SDL audio device\n"
+      "                      (e.g. 'default', device index '0', device name,\n"
+      "                       or 'playback,capture'; 'list' to show devices)\n"
+      "  --rate <hz>         Sample rate (default 48000Hz)\n"
+      "  --buffer <n>        Buffer size (default %d samples)\n\n",
+      DEFAULT_SDL_BUFFER);
+#endif
+
 #ifdef WITH_ALSA
     fprintf(fd, "MIDI control:\n"
       "  --dicer <device>    Novation Dicer\n\n");
@@ -197,7 +212,7 @@ int main(int argc, const char *argv[])
 
     struct library library;
 
-#if defined WITH_OSS || WITH_ALSA
+#if defined WITH_OSS || WITH_ALSA || defined WITH_SDL
     unsigned int rate;  /* or 0 for 'automatic' */
 #endif
 
@@ -207,6 +222,10 @@ int main(int argc, const char *argv[])
 
 #ifdef WITH_ALSA
     unsigned int alsa_buffer;
+#endif
+
+#ifdef WITH_SDL
+    unsigned int sdl_buffer;
 #endif
 
     fprintf(stderr, "%s\n\n" NOTICE "\n\n", banner);
@@ -247,12 +266,16 @@ int main(int argc, const char *argv[])
     phono = false;
     use_mlock = false;
 
-#if defined WITH_OSS || WITH_ALSA
+#if defined WITH_OSS || WITH_ALSA || defined WITH_SDL
     rate = 0; /* automatic */
 #endif
 
 #ifdef WITH_ALSA
     alsa_buffer = DEFAULT_ALSA_BUFFER;
+#endif
+
+#ifdef WITH_SDL
+    sdl_buffer = DEFAULT_SDL_BUFFER;
 #endif
 
 #ifdef WITH_OSS
@@ -335,7 +358,7 @@ int main(int argc, const char *argv[])
             argc -= 2;
 #endif
 
-#if defined WITH_OSS || WITH_ALSA
+#if defined WITH_OSS || WITH_ALSA || defined WITH_SDL
         } else if (!strcmp(argv[0], "--rate") || !strcmp(argv[0], "-r")) {
 
             if (!strcmp(argv[0], "-r"))
@@ -363,21 +386,26 @@ int main(int argc, const char *argv[])
             argc -= 2;
 #endif
 
-#ifdef WITH_ALSA
+#if defined WITH_ALSA || defined WITH_SDL
         } else if (!strcmp(argv[0], "-m")) {
             fprintf(stderr, "-m is no longer available, check the man page for --buffer in samples\n");
             return -1;
 
         } else if (!strcmp(argv[0], "--buffer")) {
 
-            /* Set size of ALSA buffer for subsequence devices */
+            /* Set size of buffer for subsequent devices */
 
             if (argc < 2) {
                 fprintf(stderr, "--buffer requires an integer argument.\n");
                 return -1;
             }
 
+#ifdef WITH_ALSA
             alsa_buffer = strtoul(argv[1], &endptr, 10);
+#endif
+#ifdef WITH_SDL
+            sdl_buffer = strtoul(argv[1], &endptr, 10);
+#endif
             if (*endptr != '\0') {
                 fprintf(stderr, "--buffer requires an integer argument.\n");
                 return -1;
@@ -388,7 +416,7 @@ int main(int argc, const char *argv[])
 #endif
 
         } else if (!strcmp(argv[0], "--oss") || !strcmp(argv[0], "--alsa") ||
-                  !strcmp(argv[0], "--jack"))
+                  !strcmp(argv[0], "--jack") || !strcmp(argv[0], "--sdl"))
         {
             int r;
             struct device *device;
@@ -424,6 +452,11 @@ int main(int argc, const char *argv[])
 #ifdef WITH_JACK
             case 'j':
                 r = jack_init(device, argv[1]);
+                break;
+#endif
+#ifdef WITH_SDL
+            case 's':
+                r = sdl_init(device, argv[1], rate, sdl_buffer);
                 break;
 #endif
             default:

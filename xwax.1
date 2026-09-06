@@ -152,6 +152,24 @@ subsequent decks.
 .B \-\-oss\-fragment \fIn\fR
 Set the size of a buffer used by the OSS device. The actual buffer is
 2^n bytes. Applies to subsequent decks.
+.SH "SDL AUDIO DEVICE OPTIONS"
+.P
+The following options are available only when xwax is compiled with
+SDL audio support.
+.TP
+.B \-\-sdl \fIdevice\fR
+Create a deck which uses the given SDL audio device.
+Use \fBdefault\fR or \fB""\fR for the system default audio device, a device index
+(eg. \fB0\fR), or a device name.
+To specify different playback and capture devices, separate them with a comma
+(eg. \fIplayback,capture\fR). To disable capture, use \fInone\fR (eg. \fIplayback,none\fR).
+Use \fB\-\-sdl list\fR to view available audio devices.
+.TP
+.B \-\-rate \fIhz\fR
+Set the sample rate for subsequent decks (default 48000Hz).
+.TP
+.B \-\-buffer \fIsamples\fR
+Set the buffer size in audio frames for subsequent decks (default 512).
 .SH HARDWARE CONTROLLER OPTIONS
 .P
 The following options are available only when xwax is compiled
