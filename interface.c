@@ -188,6 +188,7 @@ static SDL_Color background_col = {0, 0, 0, 255},
 static unsigned short *spinner_angle, spinner_size;
 
 static int meter_scale = DEFAULT_METER_SCALE;
+static int fft_vertical_scale;
 static float scale = DEFAULT_SCALE;
 static iconv_t utf;
 static pthread_t ph;
@@ -1151,20 +1152,26 @@ static inline void draw_column_alpha(SDL_Surface *surface, int x, int y, int h,
     }
 }
 
-static void draw_fft_scale(SDL_Surface *surface, int x, int y, int w, int h, int scale)
+static void draw_fft_scale(SDL_Surface *surface, int x, int y, int w, int h,
+                           int scale, int vertical_scale)
 {
-    if (h < DETAIL_FONT_SPACE + 4 || w < 100)
+    static const char *vertical_scale_labels[] = {
+        "1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x"
+    };
+
+    if (h < DETAIL_FONT_SPACE + 4 || w < 180)
         return;
 
-    char buf[32];
+    char buf[48];
     struct rect label = {
         .x = x + 4,
         .y = y + h - DETAIL_FONT_SPACE - 4,
-        .w = 92,
+        .w = 172,
         .h = DETAIL_FONT_SPACE
     };
 
-    snprintf(buf, sizeof(buf), "Scale: %d", scale);
+    snprintf(buf, sizeof(buf), "Scale: %d FFT:%s", scale,
+             vertical_scale_labels[vertical_scale + 3]);
     draw_text(surface, &label, buf, detail_font, detail_col, background_col);
 }
 
@@ -1297,7 +1304,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
     tr = player ? player->track : NULL;
     if (!tr || tr->length == 0) {
-        draw_fft_scale(surface, x, y, w, h, scale);
+        draw_fft_scale(surface, x, y, w, h, scale, fft_vertical_scale);
         return;
     }
 
@@ -1317,7 +1324,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     /* If precompute isn't ready, draw a faded overview and return */
     if (!precompute_ready[d]) {
         draw_rect(surface, rect, dim(background_col, 1));
-        draw_fft_scale(surface, x, y, w, h, scale);
+        draw_fft_scale(surface, x, y, w, h, scale, fft_vertical_scale);
         return;
     }
 
@@ -1330,6 +1337,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
     /* Match the waveform zoom: each screen column spans 2^scale samples. */
     double step = (double)(1 << scale) * HISTORY_WIDTH / (double)tr->length;
+    double vertical_gain = ldexp(1.0, fft_vertical_scale);
 
     for (int col = 0; col < w; col++) {
         double offset = ((double)col - (double)w / 2.0) * step;
@@ -1355,12 +1363,13 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
             {255, 140, 0, 255},
             {255, 0, 0, 255}
         };
-
         const uint8_t alpha = 140;
 
         /* Draw left channel upward from centre */
         for (int b = 0; b < 6; b++) {
-            int left_h = (slice.l[b] * half_h) / 255;
+            int left_h = (int)(slice.l[b] * half_h * vertical_gain / 255.0);
+            if (left_h > half_h)
+                left_h = half_h;
             if (left_h > 0) {
                 int top = centre - left_h;
                 draw_column_alpha(surface, xcol, top, left_h,
@@ -1370,7 +1379,9 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
         /* Draw right channel downward from centre */
         for (int b = 0; b < 6; b++) {
-            int right_h = (slice.r[b] * half_h) / 255;
+            int right_h = (int)(slice.r[b] * half_h * vertical_gain / 255.0);
+            if (right_h > half_h)
+                right_h = half_h;
             if (right_h > 0) {
                 int draw_y = centre;
                 draw_column_alpha(surface, xcol, draw_y, right_h,
@@ -1382,7 +1393,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     /* Draw playhead needle at current audio position (centre) */
     int needle_x = x + w / 2;
     draw_column_alpha(surface, needle_x, y, h, needle_col.r, needle_col.g, needle_col.b, 230);
-    draw_fft_scale(surface, x, y, w, h, scale);
+    draw_fft_scale(surface, x, y, w, h, scale, fft_vertical_scale);
 }
 
 /*
@@ -2005,6 +2016,18 @@ static bool handle_key(SDL_Keycode key, Uint16 mod)
             meter_scale = MAX_METER_SCALE;
 
         fprintf(stderr, "Meter scale increased to %d\n", meter_scale);
+
+    } else if (key == SDLK_KP_DIVIDE) {
+        if (fft_vertical_scale > -3)
+            fft_vertical_scale--;
+
+        fprintf(stderr, "FFT vertical scale decreased to %d\n", fft_vertical_scale);
+
+    } else if (key == SDLK_KP_MULTIPLY) {
+        if (fft_vertical_scale < 3)
+            fft_vertical_scale++;
+
+        fprintf(stderr, "FFT vertical scale increased to %d\n", fft_vertical_scale);
 
     } else if (key >= SDLK_F1 && key <= SDLK_F12) {
         size_t d;
