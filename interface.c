@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <stdint.h>
 
 #include <SDL.h>
 #include <SDL_ttf.h>
@@ -1099,6 +1100,12 @@ static fftw_complex fft_out[FFT_SIZE / 2 + 1];
 static bool history_initialized = false;
 /* Track precompute pointers: when track pointer changes we recompute timeline */
 static const struct track *precomputed_track[MAX_DECKS] = { NULL };
+/* Precompute threading */
+static pthread_t precompute_thread[MAX_DECKS];
+static bool precompute_running[MAX_DECKS] = { false };
+static bool precompute_ready[MAX_DECKS] = { false };
+static const struct track *precompute_target[MAX_DECKS] = { NULL };
+static pthread_mutex_t precompute_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Helper function to draw an alpha-transparent pixel overlay */
 static inline void draw_pixel_alpha(SDL_Surface *surface, int x, int y,
@@ -1144,11 +1151,97 @@ static inline void draw_column_alpha(SDL_Surface *surface, int x, int y, int h,
     }
 }
 
+/* Precompute worker: computes entire timeline for deck `d` into visual_history[d]
+ * This runs off the main thread to avoid UI stutters. */
+static void *precompute_timeline(void *arg)
+{
+    int d = (int)(intptr_t)arg;
+    const struct track *tr = precompute_target[d];
+
+    if (!tr)
+        goto finish;
+
+    const double band_bounds[7] = {0.0, 0.05, 0.12, 0.30, 0.50, 0.75, 1.0};
+    const double scalers[6] = {10.0, 8.0, 5.0, 4.0, 3.0, 3.0};
+    int half_fft = FFT_SIZE / 2;
+
+    /* local buffer to avoid holding the mutex while computing */
+    struct fft_slice local_history[HISTORY_WIDTH];
+
+    for (int slot = 0; slot < HISTORY_WIDTH; slot++) {
+        long center = (long long)slot * (long long)tr->length / HISTORY_WIDTH;
+        int start = center - FFT_SIZE / 2;
+
+        static double in_l[FFT_SIZE];
+        static double in_r[FFT_SIZE];
+        double bands_l[6] = {0}, bands_r[6] = {0};
+
+        for (int i = 0; i < FFT_SIZE; i++) {
+            int s = start + i;
+            double win = 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
+
+            if (s >= 0 && s < (int)tr->length) {
+                signed short *pcm = track_get_sample((struct track *)tr, s);
+                in_l[i] = (double)pcm[0] / 32768.0;
+                in_r[i] = (double)pcm[1] / 32768.0;
+            } else {
+                in_l[i] = 0.0;
+                in_r[i] = 0.0;
+            }
+
+            in_l[i] *= win;
+            in_r[i] *= win;
+        }
+
+        fftw_execute_dft_r2c(fft_plan, in_l, fft_out);
+        for (int i = 1; i < half_fft; i++) {
+            double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
+            double frac = (double)i / (double)half_fft;
+            for (int b = 0; b < 6; b++) {
+                if (frac >= band_bounds[b] && frac < band_bounds[b+1]) {
+                    bands_l[b] += mag;
+                    break;
+                }
+            }
+        }
+
+        fftw_execute_dft_r2c(fft_plan, in_r, fft_out);
+        for (int i = 1; i < half_fft; i++) {
+            double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
+            double frac = (double)i / (double)half_fft;
+            for (int b = 0; b < 6; b++) {
+                if (frac >= band_bounds[b] && frac < band_bounds[b+1]) {
+                    bands_r[b] += mag;
+                    break;
+                }
+            }
+        }
+
+        for (int b = 0; b < 6; b++) {
+            local_history[slot].l[b] = (uint8_t)fmin(bands_l[b] * scalers[b], 255.0);
+            local_history[slot].r[b] = (uint8_t)fmin(bands_r[b] * scalers[b], 255.0);
+        }
+    }
+
+    /* copy into global timeline under mutex */
+    pthread_mutex_lock(&precompute_mutex);
+    for (int slot = 0; slot < HISTORY_WIDTH; slot++)
+        visual_history[d][slot] = local_history[slot];
+    precomputed_track[d] = tr;
+    precompute_ready[d] = true;
+    pthread_mutex_unlock(&precompute_mutex);
+
+finish:
+    precompute_running[d] = false;
+    return NULL;
+}
+
 /* Core FFT Processing and Rolling Render
  *
  * Precompute a timeline of FFT band values across the whole track when the
- * track changes. Render the timeline with the current playhead horizontally
- * centred.
+ * track changes. Rendering uses the precomputed data; when precompute is in
+ * progress we skip rendering until ready (to keep UI responsive) and draw a
+ * faded background instead.
  */
 static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *player,
                                        struct cues *cues, const struct rect *rect, int d)
@@ -1177,6 +1270,9 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
             history_head[i] = 0;
             last_pos[i] = -1;
             precomputed_track[i] = NULL;
+            precompute_ready[i] = false;
+            precompute_running[i] = false;
+            precompute_target[i] = NULL;
         }
         history_initialized = true;
     }
@@ -1187,72 +1283,21 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
     pos = (int)(player_get_elapsed(player) * tr->rate);
 
-    /* If the track changed (or wasn't precomputed), precompute the whole timeline */
-    if (precomputed_track[d] != tr) {
-        const double band_bounds[7] = {0.0, 0.05, 0.12, 0.30, 0.50, 0.75, 1.0};
-        const double scalers[6] = {10.0, 8.0, 5.0, 4.0, 3.0, 3.0};
-        int half_fft = FFT_SIZE / 2;
-
-        /* For each timeline slot, compute FFT centred at that sample */
-        for (int slot = 0; slot < HISTORY_WIDTH; slot++) {
-            long center = (long long)slot * (long long)tr->length / HISTORY_WIDTH;
-            int start = center - FFT_SIZE / 2;
-
-            /* prepare left/right buffers */
-            static double in_l[FFT_SIZE];
-            static double in_r[FFT_SIZE];
-            double bands_l[6] = {0}, bands_r[6] = {0};
-
-            for (int i = 0; i < FFT_SIZE; i++) {
-                int s = start + i;
-                double win = 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
-
-                if (s >= 0 && s < (int)tr->length) {
-                    signed short *pcm = track_get_sample(tr, s);
-                    in_l[i] = (double)pcm[0] / 32768.0;
-                    in_r[i] = (double)pcm[1] / 32768.0;
-                } else {
-                    in_l[i] = 0.0;
-                    in_r[i] = 0.0;
-                }
-
-                in_l[i] *= win;
-                in_r[i] *= win;
-            }
-
-            /* left */
-            fftw_execute_dft_r2c(fft_plan, in_l, fft_out);
-            for (int i = 1; i < half_fft; i++) {
-                double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
-                double frac = (double)i / (double)half_fft;
-                for (int b = 0; b < 6; b++) {
-                    if (frac >= band_bounds[b] && frac < band_bounds[b+1]) {
-                        bands_l[b] += mag;
-                        break;
-                    }
-                }
-            }
-
-            /* right */
-            fftw_execute_dft_r2c(fft_plan, in_r, fft_out);
-            for (int i = 1; i < half_fft; i++) {
-                double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
-                double frac = (double)i / (double)half_fft;
-                for (int b = 0; b < 6; b++) {
-                    if (frac >= band_bounds[b] && frac < band_bounds[b+1]) {
-                        bands_r[b] += mag;
-                        break;
-                    }
-                }
-            }
-
-            for (int b = 0; b < 6; b++) {
-                visual_history[d][slot].l[b] = (uint8_t)fmin(bands_l[b] * scalers[b], 255.0);
-                visual_history[d][slot].r[b] = (uint8_t)fmin(bands_r[b] * scalers[b], 255.0);
-            }
+    /* If the track changed ensure there's a background precompute running */
+    if (precomputed_track[d] != tr && !precompute_running[d]) {
+        precompute_running[d] = true;
+        precompute_ready[d] = false;
+        precompute_target[d] = tr;
+        if (pthread_create(&precompute_thread[d], NULL, precompute_timeline, (void *)(intptr_t)d) != 0) {
+            perror("pthread_create");
+            precompute_running[d] = false;
         }
+    }
 
-        precomputed_track[d] = tr;
+    /* If precompute isn't ready, draw a faded overview and return */
+    if (!precompute_ready[d]) {
+        draw_rect(surface, rect, dim(background_col, 1));
+        return;
     }
 
     /* Now render the timeline with the current playhead centred */
@@ -1270,7 +1315,12 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
         int hist_idx = (int)llrint((double)pos_idx + offset);
         hist_idx = (hist_idx % HISTORY_WIDTH + HISTORY_WIDTH) % HISTORY_WIDTH;
 
-        struct fft_slice slice = visual_history[d][hist_idx];
+        struct fft_slice slice;
+        /* copy slice under mutex to avoid races with precompute thread */
+        pthread_mutex_lock(&precompute_mutex);
+        slice = visual_history[d][hist_idx];
+        pthread_mutex_unlock(&precompute_mutex);
+
         int xcol = x + col;
         int centre = y + half_h;
 
