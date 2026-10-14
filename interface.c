@@ -1151,6 +1151,23 @@ static inline void draw_column_alpha(SDL_Surface *surface, int x, int y, int h,
     }
 }
 
+static void draw_fft_scale(SDL_Surface *surface, int x, int y, int w, int h, int scale)
+{
+    if (h < DETAIL_FONT_SPACE + 4 || w < 100)
+        return;
+
+    char buf[32];
+    struct rect label = {
+        .x = x + 4,
+        .y = y + h - DETAIL_FONT_SPACE - 4,
+        .w = 92,
+        .h = DETAIL_FONT_SPACE
+    };
+
+    snprintf(buf, sizeof(buf), "Scale: %d", scale);
+    draw_text(surface, &label, buf, detail_font, detail_col, background_col);
+}
+
 /* Precompute worker: computes entire timeline for deck `d` into visual_history[d]
  * This runs off the main thread to avoid UI stutters. */
 static void *precompute_timeline(void *arg)
@@ -1244,7 +1261,8 @@ finish:
  * faded background instead.
  */
 static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *player,
-                                       struct cues *cues, const struct rect *rect, int d)
+                                       struct cues *cues, const struct rect *rect,
+                                       int scale, int d)
 {
     int x, y, w, h;
     struct track *tr;
@@ -1278,8 +1296,10 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     }
 
     tr = player ? player->track : NULL;
-    if (!tr || tr->length == 0)
+    if (!tr || tr->length == 0) {
+        draw_fft_scale(surface, x, y, w, h, scale);
         return;
+    }
 
     pos = (int)(player_get_elapsed(player) * tr->rate);
 
@@ -1297,6 +1317,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     /* If precompute isn't ready, draw a faded overview and return */
     if (!precompute_ready[d]) {
         draw_rect(surface, rect, dim(background_col, 1));
+        draw_fft_scale(surface, x, y, w, h, scale);
         return;
     }
 
@@ -1307,8 +1328,8 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     if (tr->length)
         pos_idx = (long long)pos * HISTORY_WIDTH / tr->length;
 
-    /* step in timeline per screen column (float for accuracy) */
-    double step = (double)HISTORY_WIDTH / (double)w;
+    /* Match the waveform zoom: each screen column spans 2^scale samples. */
+    double step = (double)(1 << scale) * HISTORY_WIDTH / (double)tr->length;
 
     for (int col = 0; col < w; col++) {
         double offset = ((double)col - (double)w / 2.0) * step;
@@ -1361,6 +1382,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     /* Draw playhead needle at current audio position (centre) */
     int needle_x = x + w / 2;
     draw_column_alpha(surface, needle_x, y, h, needle_col.r, needle_col.g, needle_col.b, 230);
+    draw_fft_scale(surface, x, y, w, h, scale);
 }
 
 /*
@@ -1388,7 +1410,7 @@ static void draw_meters(SDL_Surface *surface, const struct rect *rect,
         closeup = *rect;
 
     if (use_fft_visualizer) {
-        draw_fft_scrolling_history(surface, pl, c, &closeup, deck_index);
+        draw_fft_scrolling_history(surface, pl, c, &closeup, scale, deck_index);
     } else {
         draw_closeup(surface, &closeup, tr, c, position, scale);
     }
