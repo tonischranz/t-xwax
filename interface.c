@@ -143,7 +143,8 @@
 #define HISTORY_WIDTH 2048
 
 struct fft_slice {
-    uint8_t r, g, b;
+    uint8_t l[6];
+    uint8_t r[6];
 };
 
 /* Macro functions */
@@ -1181,45 +1182,98 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     if (pos != last_pos[d]) {
         int start = pos - FFT_SIZE / 2;
         int half_fft = FFT_SIZE / 2;
-        double bass = 0.0, mid = 0.0, high = 0.0;
+        double bands_l[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        double bands_r[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        double fft_in_l[FFT_SIZE];
+        double fft_in_r[FFT_SIZE];
+        const double band_bounds[7] = {0.0, 0.05, 0.12, 0.30, 0.50, 0.75, 1.0};
+        const double scalers[6] = {10.0, 8.0, 5.0, 4.0, 3.0, 3.0};
 
         for (int i = 0; i < FFT_SIZE; i++) {
             int s = start + i;
+            double win = 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
+
             if (s >= 0 && s < (int)tr->length) {
                 signed short *pcm = track_get_sample(tr, s);
-                fft_in[i] = ((double)pcm[0] + (double)pcm[1]) / 65536.0;
+                fft_in_l[i] = (double)pcm[0] / 32768.0;
+                fft_in_r[i] = (double)pcm[1] / 32768.0;
             } else {
-                fft_in[i] = 0.0;
+                fft_in_l[i] = 0.0;
+                fft_in_r[i] = 0.0;
             }
-            fft_in[i] *= 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
+
+            fft_in_l[i] *= win;
+            fft_in_r[i] *= win;
         }
 
-        fftw_execute(fft_plan);
-
+        fftw_execute_dft_r2c(fft_plan, fft_in_l, fft_out);
         for (int i = 1; i < half_fft; i++) {
             double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
-            if (i < half_fft * 0.1)
-                bass += mag;
-            else if (i < half_fft * 0.5)
-                mid += mag;
-            else
-                high += mag;
+            double frac = (double)i / (double)half_fft;
+            int b;
+
+            for (b = 0; b < 6; b++) {
+                if (frac >= band_bounds[b] && frac < band_bounds[b + 1]) {
+                    bands_l[b] += mag;
+                    break;
+                }
+            }
         }
 
-        visual_history[d][history_head[d]].r = (uint8_t)fmin(bass * 4.0, 255.0);
-        visual_history[d][history_head[d]].g = (uint8_t)fmin(mid * 3.0, 255.0);
-        visual_history[d][history_head[d]].b = (uint8_t)fmin(high * 4.0, 255.0);
+        fftw_execute_dft_r2c(fft_plan, fft_in_r, fft_out);
+        for (int i = 1; i < half_fft; i++) {
+            double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
+            double frac = (double)i / (double)half_fft;
+            int b;
+
+            for (b = 0; b < 6; b++) {
+                if (frac >= band_bounds[b] && frac < band_bounds[b + 1]) {
+                    bands_r[b] += mag;
+                    break;
+                }
+            }
+        }
+
+        for (int b = 0; b < 6; b++) {
+            visual_history[d][history_head[d]].l[b] = (uint8_t)fmin(bands_l[b] * scalers[b], 255.0);
+            visual_history[d][history_head[d]].r[b] = (uint8_t)fmin(bands_r[b] * scalers[b], 255.0);
+        }
 
         history_head[d] = (history_head[d] + 1) % HISTORY_WIDTH;
         last_pos[d] = pos;
     }
 
-    /* Render timeline history transparently onto the surface */
+    /* Colors for the 6 bands: low to high */
+    static const SDL_Color band_colors[6] = {
+        {75, 0, 130, 255},
+        {0, 0, 139, 255},
+        {0, 200, 0, 255},
+        {255, 215, 0, 255},
+        {255, 140, 0, 255},
+        {255, 0, 0, 255}
+    };
+
     for (int col = 0; col < w; col++) {
         int hist_idx = (history_head[d] - 1 - col + HISTORY_WIDTH * 10) % HISTORY_WIDTH;
         struct fft_slice slice = visual_history[d][hist_idx];
+        int xcol = x + (w - 1 - col);
+        int centre = y + h / 2;
 
-        draw_column_alpha(surface, x + (w - 1 - col), y, h, slice.r, slice.g, slice.b, 140);
+        for (int b = 0; b < 6; b++) {
+            int left_h = (slice.l[b] * (h / 2)) / 255;
+            int right_h = (slice.r[b] * (h / 2)) / 255;
+
+            if (left_h > 0) {
+                int top = centre - left_h;
+                draw_column_alpha(surface, xcol, top, left_h,
+                                  band_colors[b].r, band_colors[b].g, band_colors[b].b, 140);
+            }
+
+            if (right_h > 0) {
+                draw_column_alpha(surface, xcol, centre, right_h,
+                                  band_colors[b].r, band_colors[b].g, band_colors[b].b, 140);
+            }
+        }
     }
 
     /* Draw playhead needle at current audio position (right edge) */
