@@ -40,6 +40,7 @@ struct device_ops {
     int (*handle)(struct device *dv);
 
     unsigned int (*sample_rate)(struct device *dv);
+    int (*toggle_monitor)(struct device *dv);
     void (*start)(struct device *dv);
     void (*stop)(struct device *dv);
 
@@ -53,6 +54,7 @@ void device_connect_timecoder(struct device *dv, struct timecoder *tc);
 void device_connect_player(struct device *dv, struct player *pl);
 
 unsigned int device_sample_rate(struct device *dv);
+int device_toggle_monitor(struct device *dv);
 
 void device_start(struct device *dv);
 void device_stop(struct device *dv);

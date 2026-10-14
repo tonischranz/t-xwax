@@ -163,6 +163,9 @@ Use \fBdefault\fR or \fB""\fR for the system default audio device, a device inde
 (eg. \fB0\fR), or a device name.
 To specify different playback and capture devices, separate them with a comma
 (eg. \fIplayback,capture\fR). To disable capture, use \fInone\fR (eg. \fIplayback,none\fR).
+An optional third device can be specified as a monitor output
+(eg. \fIplayback,capture,monitor\fR). The monitor is muted initially and can
+be toggled per deck with F4, F8 or F12.
 Use \fB\-\-sdl list\fR to view available audio devices.
 .TP
 .B \-\-rate \fIhz\fR
@@ -225,6 +228,7 @@ Deck 0	Deck 1	Deck 2
 F1	F5	F9	Load currently selected track to this deck
 F2	F6	F10	Reset start of track to the current position
 F3	F7	F11	Toggle timecode control on/off
+F4	F8	F12	Toggle SDL monitor output on/off (when configured)
 C-F3	C-F7	C-F11	Cycle between available timecodes
 .TE
 .P

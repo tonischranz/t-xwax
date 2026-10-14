@@ -64,6 +64,19 @@ unsigned int device_sample_rate(struct device *dv)
 }
 
 /*
+ * Toggle an optional monitor output. Return -1 if this device does not
+ * provide one, otherwise return its new state.
+ */
+
+int device_toggle_monitor(struct device *dv)
+{
+    if (dv->ops->toggle_monitor == NULL)
+        return -1;
+
+    return dv->ops->toggle_monitor(dv);
+}
+
+/*
  * Start the device inputting and outputting audio
  */
 

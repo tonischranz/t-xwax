@@ -129,7 +129,8 @@ static void usage(FILE *fd)
     fprintf(fd, "SDL audio device options:\n"
       "  --sdl <device>      Build a deck connected to SDL audio device\n"
       "                      (e.g. 'default', device index '0', device name,\n"
-      "                       or 'playback,capture'; 'list' to show devices)\n"
+    "                       'playback,capture', or 'playback,capture,monitor';\n"
+    "                       'list' to show devices)\n"
       "  --rate <hz>         Sample rate (default 48000Hz)\n"
       "  --buffer <n>        Buffer size (default %d samples)\n\n",
       DEFAULT_SDL_BUFFER);

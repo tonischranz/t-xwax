@@ -121,6 +121,7 @@
 #define FUNC_LOAD 0
 #define FUNC_RECUE 1
 #define FUNC_TIMECODE 2
+#define FUNC_MONITOR 3
 
 /* Types of SDL_USEREVENT */
 
@@ -1743,6 +1744,15 @@ static bool handle_key(SDL_Keycode key, Uint16 mod)
                         timecoder_cycle_definition(tc);
                 } else {
                     (void)player_toggle_timecode_control(pl);
+                }
+                break;
+
+            case FUNC_MONITOR:
+                {
+                    int enabled = device_toggle_monitor(&de->device);
+                    if (enabled >= 0)
+                        status_printf(STATUS_INFO, "Deck %zu monitor %s",
+                                      d + 1, enabled ? "on" : "off");
                 }
                 break;
             }

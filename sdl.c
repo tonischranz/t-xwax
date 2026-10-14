@@ -49,9 +49,12 @@ struct sdl_fifo {
 struct sdl {
     SDL_AudioDeviceID playback_dev;
     SDL_AudioDeviceID capture_dev;
+    SDL_AudioDeviceID monitor_dev;
     unsigned int rate;
     bool started;
+    atomic_bool monitor_enabled;
     struct sdl_fifo fifo;
+    struct sdl_fifo monitor_fifo;
 };
 
 static unsigned int sdl_deck_count = 0;
@@ -151,15 +154,80 @@ static void playback_callback(void *userdata, Uint8 *stream, int len)
         size_t block = (remain < MAX_BLOCK) ? remain : MAX_BLOCK;
 
         device_collect(dv, pcm_out, block);
+
+        if (sdl->monitor_dev > 0 &&
+            atomic_load_explicit(&sdl->monitor_enabled, memory_order_relaxed)) {
+            size_t head = atomic_load_explicit(&sdl->monitor_fifo.head,
+                                               memory_order_relaxed);
+            size_t tail = atomic_load_explicit(&sdl->monitor_fifo.tail,
+                                               memory_order_acquire);
+            size_t occupied = head - tail;
+            size_t space = (occupied < FIFO_FRAMES) ? (FIFO_FRAMES - occupied) : 0;
+            size_t to_write = (block < space) ? block : space;
+
+            for (size_t i = 0; i < to_write; i++) {
+                size_t idx = (head + i) & FIFO_MASK;
+                sdl->monitor_fifo.buf[idx * DEVICE_CHANNELS] = pcm_out[i * DEVICE_CHANNELS];
+                sdl->monitor_fifo.buf[idx * DEVICE_CHANNELS + 1] =
+                    pcm_out[i * DEVICE_CHANNELS + 1];
+            }
+
+            atomic_store_explicit(&sdl->monitor_fifo.head, head + to_write,
+                                  memory_order_release);
+        }
+
         pcm_out += block * DEVICE_CHANNELS;
         remain -= block;
     }
+}
+
+static void monitor_callback(void *userdata, Uint8 *stream, int len)
+{
+    struct device *dv = (struct device*)userdata;
+    struct sdl *sdl = (struct sdl*)dv->local;
+    size_t frames = len / (DEVICE_CHANNELS * sizeof(signed short));
+    signed short *pcm = (signed short*)stream;
+
+    memset(stream, 0, len);
+
+    size_t head = atomic_load_explicit(&sdl->monitor_fifo.head, memory_order_acquire);
+    size_t tail = atomic_load_explicit(&sdl->monitor_fifo.tail, memory_order_relaxed);
+
+    if (!atomic_load_explicit(&sdl->monitor_enabled, memory_order_relaxed)) {
+        atomic_store_explicit(&sdl->monitor_fifo.tail, head, memory_order_release);
+        return;
+    }
+
+    size_t available = head - tail;
+    size_t to_read = (frames < available) ? frames : available;
+
+    for (size_t i = 0; i < to_read; i++) {
+        size_t idx = (tail + i) & FIFO_MASK;
+        pcm[i * DEVICE_CHANNELS] = sdl->monitor_fifo.buf[idx * DEVICE_CHANNELS];
+        pcm[i * DEVICE_CHANNELS + 1] = sdl->monitor_fifo.buf[idx * DEVICE_CHANNELS + 1];
+    }
+
+    atomic_store_explicit(&sdl->monitor_fifo.tail, tail + to_read, memory_order_release);
 }
 
 static unsigned int sample_rate(struct device *dv)
 {
     struct sdl *sdl = (struct sdl*)dv->local;
     return sdl->rate;
+}
+
+static int toggle_monitor(struct device *dv)
+{
+    struct sdl *sdl = (struct sdl*)dv->local;
+    bool enabled;
+
+    if (sdl->monitor_dev == 0)
+        return -1;
+
+    enabled = !atomic_load_explicit(&sdl->monitor_enabled, memory_order_relaxed);
+    atomic_store_explicit(&sdl->monitor_enabled, enabled, memory_order_relaxed);
+
+    return enabled;
 }
 
 static void start(struct device *dv)
@@ -173,6 +241,9 @@ static void start(struct device *dv)
 
     if (sdl->capture_dev > 0)
         SDL_PauseAudioDevice(sdl->capture_dev, 0);
+
+    if (sdl->monitor_dev > 0)
+        SDL_PauseAudioDevice(sdl->monitor_dev, 0);
 
     if (sdl->playback_dev > 0)
         SDL_PauseAudioDevice(sdl->playback_dev, 0);
@@ -189,6 +260,9 @@ static void stop(struct device *dv)
 
     if (sdl->capture_dev > 0)
         SDL_PauseAudioDevice(sdl->capture_dev, 1);
+
+    if (sdl->monitor_dev > 0)
+        SDL_PauseAudioDevice(sdl->monitor_dev, 1);
 }
 
 static void clear(struct device *dv)
@@ -201,7 +275,11 @@ static void clear(struct device *dv)
     if (sdl->capture_dev > 0)
         SDL_CloseAudioDevice(sdl->capture_dev);
 
+    if (sdl->monitor_dev > 0)
+        SDL_CloseAudioDevice(sdl->monitor_dev);
+
     sdl_fifo_clear(&sdl->fifo);
+    sdl_fifo_clear(&sdl->monitor_fifo);
     free(sdl);
 
     assert(sdl_deck_count > 0);
@@ -213,6 +291,7 @@ static void clear(struct device *dv)
 
 static struct device_ops sdl_ops = {
     .sample_rate = sample_rate,
+    .toggle_monitor = toggle_monitor,
     .start = start,
     .stop = stop,
     .clear = clear,
@@ -270,9 +349,9 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
              unsigned int buffer)
 {
     struct sdl *sdl;
-    SDL_AudioSpec desired, obtained_play, obtained_cap;
-    const char *play_spec, *cap_spec;
-    const char *play_dev_name, *cap_dev_name;
+    SDL_AudioSpec desired, obtained_play, obtained_cap, obtained_monitor;
+    const char *play_spec, *cap_spec, *monitor_spec = NULL;
+    const char *play_dev_name, *cap_dev_name, *monitor_dev_name;
     char *name_copy = NULL;
 
     if (!SDL_WasInit(SDL_INIT_AUDIO)) {
@@ -291,7 +370,7 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
     }
 
     if (name != NULL && strchr(name, ',') != NULL) {
-        char *comma;
+        char *comma, *second_comma;
 
         name_copy = strdup(name);
         if (name_copy == NULL) {
@@ -303,6 +382,18 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
         *comma = '\0';
         play_spec = name_copy;
         cap_spec = comma + 1;
+
+        second_comma = strchr(cap_spec, ',');
+        if (second_comma != NULL) {
+            *second_comma = '\0';
+            monitor_spec = second_comma + 1;
+
+            if (strchr(monitor_spec, ',') != NULL) {
+                fprintf(stderr, "SDL: Specify at most playback,capture,monitor devices\n");
+                free(name_copy);
+                return -1;
+            }
+        }
     } else {
         play_spec = name;
         cap_spec = name;
@@ -310,6 +401,8 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
 
     play_dev_name = resolve_device_name(play_spec, 0);
     cap_dev_name = resolve_device_name(cap_spec, 1);
+    monitor_dev_name = monitor_spec != NULL ?
+        resolve_device_name(monitor_spec, 0) : (const char*)-1;
 
     sdl = malloc(sizeof *sdl);
     if (sdl == NULL) {
@@ -325,6 +418,8 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
         free(name_copy);
         return -1;
     }
+
+    atomic_init(&sdl->monitor_enabled, false);
 
     SDL_zero(desired);
     desired.freq = rate ? rate : DEFAULT_RATE;
@@ -357,12 +452,46 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
         }
     }
 
+    if (monitor_dev_name != (const char*)-1) {
+        if (sdl_fifo_init(&sdl->monitor_fifo) == -1) {
+            if (sdl->capture_dev > 0)
+                SDL_CloseAudioDevice(sdl->capture_dev);
+            SDL_CloseAudioDevice(sdl->playback_dev);
+            sdl_fifo_clear(&sdl->fifo);
+            free(sdl);
+            free(name_copy);
+            return -1;
+        }
+
+        desired.callback = monitor_callback;
+        desired.userdata = dv;
+
+        sdl->monitor_dev = SDL_OpenAudioDevice(monitor_dev_name, 0, &desired,
+                                               &obtained_monitor, 0);
+        if (sdl->monitor_dev == 0) {
+            fprintf(stderr, "SDL: Failed to open monitor device '%s': %s\n",
+                    monitor_dev_name ? monitor_dev_name : "default", SDL_GetError());
+            if (sdl->capture_dev > 0)
+                SDL_CloseAudioDevice(sdl->capture_dev);
+            SDL_CloseAudioDevice(sdl->playback_dev);
+            sdl_fifo_clear(&sdl->monitor_fifo);
+            sdl_fifo_clear(&sdl->fifo);
+            free(sdl);
+            free(name_copy);
+            return -1;
+        }
+    }
+
     fprintf(stderr, "SDL: Initialised deck on '%s' (%uHz, %u samples)",
             play_dev_name ? play_dev_name : "default", sdl->rate, obtained_play.samples);
     if (sdl->capture_dev > 0)
         fprintf(stderr, ", capture from '%s'\n", cap_dev_name ? cap_dev_name : "default");
     else
         fprintf(stderr, ", capture disabled\n");
+
+    if (sdl->monitor_dev > 0)
+        fprintf(stderr, "SDL: Monitor output on '%s' (muted initially)\n",
+                monitor_dev_name ? monitor_dev_name : "default");
 
     free(name_copy);
 
