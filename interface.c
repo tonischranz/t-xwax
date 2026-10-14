@@ -1155,7 +1155,7 @@ static void draw_fft_scale(SDL_Surface *surface, int x, int y, int w, int h,
                            int scale, int vertical_scale)
 {
     static const char *vertical_scale_labels[] = {
-        "1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x"
+         "1x", "2x", "4x", "8x"
     };
 
     if (h < DETAIL_FONT_SPACE + 4 || w < 180)
@@ -1170,7 +1170,7 @@ static void draw_fft_scale(SDL_Surface *surface, int x, int y, int w, int h,
     };
 
     snprintf(buf, sizeof(buf), "Scale: %d FFT:%s", scale,
-             vertical_scale_labels[vertical_scale + 3]);
+             vertical_scale_labels[vertical_scale]);
     draw_text(surface, &label, buf, detail_font, detail_col, background_col);
 }
 
@@ -1185,7 +1185,7 @@ static void *precompute_timeline(void *arg)
         goto finish;
 
     const double band_bounds[7] = {0.0, 0.05, 0.12, 0.30, 0.50, 0.75, 1.0};
-    const double scalers[6] = {10.0, 8.0, 5.0, 4.0, 3.0, 3.0};
+    const double scalers[6] = {3.0, 2.5, 2.0, 1.75, 1.25, 1.25};
     int half_fft = FFT_SIZE / 2;
     size_t slots = 1 + ((size_t)tr->length - 1) / FFT_HOP;
 
@@ -2022,16 +2022,16 @@ static bool handle_key(SDL_Keycode key, Uint16 mod)
         fprintf(stderr, "Meter scale increased to %d\n", meter_scale);
 
     } else if (key == SDLK_KP_DIVIDE) {
-        if (fft_vertical_scale > -3)
+        if (fft_vertical_scale > 0)
             fft_vertical_scale--;
 
-        fprintf(stderr, "FFT vertical scale decreased to %d\n", fft_vertical_scale);
+        fprintf(stderr, "FFT vertical scale decreased to %dx\n", 1 << fft_vertical_scale);
 
     } else if (key == SDLK_KP_MULTIPLY) {
         if (fft_vertical_scale < 3)
             fft_vertical_scale++;
 
-        fprintf(stderr, "FFT vertical scale increased to %d\n", fft_vertical_scale);
+        fprintf(stderr, "FFT vertical scale increased to %dx\n", 1 << fft_vertical_scale);
 
     } else if (key >= SDLK_F1 && key <= SDLK_F12) {
         size_t d;
