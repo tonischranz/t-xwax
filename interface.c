@@ -140,8 +140,8 @@
 #define REDRAW_LIBRARY     0x8
 
 #define FFT_SIZE 512
+#define FFT_HOP (FFT_SIZE / 4)
 #define MAX_DECKS 3
-#define HISTORY_WIDTH 2048
 
 struct fft_slice {
     uint8_t l[6];
@@ -1092,9 +1092,8 @@ static void draw_closeup(SDL_Surface *surface, const struct rect *rect,
     }
 }
 
-static struct fft_slice visual_history[MAX_DECKS][HISTORY_WIDTH];
-static int history_head[MAX_DECKS];
-static int last_pos[MAX_DECKS];
+static struct fft_slice *visual_history[MAX_DECKS];
+static size_t visual_history_count[MAX_DECKS];
 static fftw_plan fft_plan = NULL;
 static double fft_in[FFT_SIZE];
 static fftw_complex fft_out[FFT_SIZE / 2 + 1];
@@ -1175,7 +1174,7 @@ static void draw_fft_scale(SDL_Surface *surface, int x, int y, int w, int h,
     draw_text(surface, &label, buf, detail_font, detail_col, background_col);
 }
 
-/* Precompute worker: computes entire timeline for deck `d` into visual_history[d]
+/* Precompute worker: computes the entire track timeline for deck `d`
  * This runs off the main thread to avoid UI stutters. */
 static void *precompute_timeline(void *arg)
 {
@@ -1188,12 +1187,17 @@ static void *precompute_timeline(void *arg)
     const double band_bounds[7] = {0.0, 0.05, 0.12, 0.30, 0.50, 0.75, 1.0};
     const double scalers[6] = {10.0, 8.0, 5.0, 4.0, 3.0, 3.0};
     int half_fft = FFT_SIZE / 2;
+    size_t slots = 1 + ((size_t)tr->length - 1) / FFT_HOP;
 
-    /* local buffer to avoid holding the mutex while computing */
-    struct fft_slice local_history[HISTORY_WIDTH];
+    /* Build off-lock; publish the finished timeline in one step. */
+    struct fft_slice *local_history = calloc(slots, sizeof(*local_history));
+    if (!local_history) {
+        perror("calloc");
+        goto finish;
+    }
 
-    for (int slot = 0; slot < HISTORY_WIDTH; slot++) {
-        long center = (long long)slot * (long long)tr->length / HISTORY_WIDTH;
+    for (size_t slot = 0; slot < slots; slot++) {
+        int center = (int)(slot * FFT_HOP);
         int start = center - FFT_SIZE / 2;
 
         static double in_l[FFT_SIZE];
@@ -1249,8 +1253,9 @@ static void *precompute_timeline(void *arg)
 
     /* copy into global timeline under mutex */
     pthread_mutex_lock(&precompute_mutex);
-    for (int slot = 0; slot < HISTORY_WIDTH; slot++)
-        visual_history[d][slot] = local_history[slot];
+    free(visual_history[d]);
+    visual_history[d] = local_history;
+    visual_history_count[d] = slots;
     precomputed_track[d] = tr;
     precompute_ready[d] = true;
     pthread_mutex_unlock(&precompute_mutex);
@@ -1290,10 +1295,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
     if (!history_initialized) {
         fft_plan = fftw_plan_dft_r2c_1d(FFT_SIZE, fft_in, fft_out, FFTW_ESTIMATE);
-        memset(visual_history, 0, sizeof(visual_history));
         for (int i = 0; i < MAX_DECKS; i++) {
-            history_head[i] = 0;
-            last_pos[i] = -1;
             precomputed_track[i] = NULL;
             precompute_ready[i] = false;
             precompute_running[i] = false;
@@ -1330,24 +1332,26 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
     /* Now render the timeline with the current playhead centred */
     int half_h = h / 2;
-    /* position index in timeline */
-    int pos_idx = 0;
-    if (tr->length)
-        pos_idx = (long long)pos * HISTORY_WIDTH / tr->length;
+    /* Each history slice is centred FFT_HOP samples after the previous one. */
+    double pos_idx = (double)pos / FFT_HOP;
 
     /* Match the waveform zoom: each screen column spans 2^scale samples. */
-    double step = (double)(1 << scale) * HISTORY_WIDTH / (double)tr->length;
+    double step = (double)(1 << scale) / FFT_HOP;
     double vertical_gain = ldexp(1.0, fft_vertical_scale);
 
     for (int col = 0; col < w; col++) {
         double offset = ((double)col - (double)w / 2.0) * step;
         int hist_idx = (int)llrint((double)pos_idx + offset);
-        if (hist_idx < 0 || hist_idx >= HISTORY_WIDTH)
+        if (hist_idx < 0)
             continue;
 
         struct fft_slice slice;
-        /* copy slice under mutex to avoid races with precompute thread */
+        /* Copy the slice under mutex to avoid races with timeline publication. */
         pthread_mutex_lock(&precompute_mutex);
+        if ((size_t)hist_idx >= visual_history_count[d]) {
+            pthread_mutex_unlock(&precompute_mutex);
+            continue;
+        }
         slice = visual_history[d][hist_idx];
         pthread_mutex_unlock(&precompute_mutex);
 
