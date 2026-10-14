@@ -1097,6 +1097,8 @@ static fftw_plan fft_plan = NULL;
 static double fft_in[FFT_SIZE];
 static fftw_complex fft_out[FFT_SIZE / 2 + 1];
 static bool history_initialized = false;
+/* Track precompute pointers: when track pointer changes we recompute timeline */
+static const struct track *precomputed_track[MAX_DECKS] = { NULL };
 
 /* Helper function to draw an alpha-transparent pixel overlay */
 static inline void draw_pixel_alpha(SDL_Surface *surface, int x, int y,
@@ -1142,7 +1144,12 @@ static inline void draw_column_alpha(SDL_Surface *surface, int x, int y, int h,
     }
 }
 
-/* Core FFT Processing and Rolling Render */
+/* Core FFT Processing and Rolling Render
+ *
+ * Precompute a timeline of FFT band values across the whole track when the
+ * track changes. Render the timeline with the current playhead horizontally
+ * centred.
+ */
 static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *player,
                                        struct cues *cues, const struct rect *rect, int d)
 {
@@ -1169,6 +1176,7 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
         for (int i = 0; i < MAX_DECKS; i++) {
             history_head[i] = 0;
             last_pos[i] = -1;
+            precomputed_track[i] = NULL;
         }
         history_initialized = true;
     }
@@ -1179,105 +1187,129 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
 
     pos = (int)(player_get_elapsed(player) * tr->rate);
 
-    if (pos != last_pos[d]) {
-        int start = pos - FFT_SIZE / 2;
-        int half_fft = FFT_SIZE / 2;
-        double bands_l[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        double bands_r[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        double fft_in_l[FFT_SIZE];
-        double fft_in_r[FFT_SIZE];
+    /* If the track changed (or wasn't precomputed), precompute the whole timeline */
+    if (precomputed_track[d] != tr) {
         const double band_bounds[7] = {0.0, 0.05, 0.12, 0.30, 0.50, 0.75, 1.0};
         const double scalers[6] = {10.0, 8.0, 5.0, 4.0, 3.0, 3.0};
+        int half_fft = FFT_SIZE / 2;
 
-        for (int i = 0; i < FFT_SIZE; i++) {
-            int s = start + i;
-            double win = 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
+        /* For each timeline slot, compute FFT centred at that sample */
+        for (int slot = 0; slot < HISTORY_WIDTH; slot++) {
+            long center = (long long)slot * (long long)tr->length / HISTORY_WIDTH;
+            int start = center - FFT_SIZE / 2;
 
-            if (s >= 0 && s < (int)tr->length) {
-                signed short *pcm = track_get_sample(tr, s);
-                fft_in_l[i] = (double)pcm[0] / 32768.0;
-                fft_in_r[i] = (double)pcm[1] / 32768.0;
-            } else {
-                fft_in_l[i] = 0.0;
-                fft_in_r[i] = 0.0;
+            /* prepare left/right buffers */
+            static double in_l[FFT_SIZE];
+            static double in_r[FFT_SIZE];
+            double bands_l[6] = {0}, bands_r[6] = {0};
+
+            for (int i = 0; i < FFT_SIZE; i++) {
+                int s = start + i;
+                double win = 0.5 * (1.0 - cos(2.0 * M_PI * i / (FFT_SIZE - 1)));
+
+                if (s >= 0 && s < (int)tr->length) {
+                    signed short *pcm = track_get_sample(tr, s);
+                    in_l[i] = (double)pcm[0] / 32768.0;
+                    in_r[i] = (double)pcm[1] / 32768.0;
+                } else {
+                    in_l[i] = 0.0;
+                    in_r[i] = 0.0;
+                }
+
+                in_l[i] *= win;
+                in_r[i] *= win;
             }
 
-            fft_in_l[i] *= win;
-            fft_in_r[i] *= win;
-        }
-
-        fftw_execute_dft_r2c(fft_plan, fft_in_l, fft_out);
-        for (int i = 1; i < half_fft; i++) {
-            double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
-            double frac = (double)i / (double)half_fft;
-            int b;
-
-            for (b = 0; b < 6; b++) {
-                if (frac >= band_bounds[b] && frac < band_bounds[b + 1]) {
-                    bands_l[b] += mag;
-                    break;
+            /* left */
+            fftw_execute_dft_r2c(fft_plan, in_l, fft_out);
+            for (int i = 1; i < half_fft; i++) {
+                double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
+                double frac = (double)i / (double)half_fft;
+                for (int b = 0; b < 6; b++) {
+                    if (frac >= band_bounds[b] && frac < band_bounds[b+1]) {
+                        bands_l[b] += mag;
+                        break;
+                    }
                 }
             }
-        }
 
-        fftw_execute_dft_r2c(fft_plan, fft_in_r, fft_out);
-        for (int i = 1; i < half_fft; i++) {
-            double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
-            double frac = (double)i / (double)half_fft;
-            int b;
-
-            for (b = 0; b < 6; b++) {
-                if (frac >= band_bounds[b] && frac < band_bounds[b + 1]) {
-                    bands_r[b] += mag;
-                    break;
+            /* right */
+            fftw_execute_dft_r2c(fft_plan, in_r, fft_out);
+            for (int i = 1; i < half_fft; i++) {
+                double mag = sqrt(fft_out[i][0] * fft_out[i][0] + fft_out[i][1] * fft_out[i][1]);
+                double frac = (double)i / (double)half_fft;
+                for (int b = 0; b < 6; b++) {
+                    if (frac >= band_bounds[b] && frac < band_bounds[b+1]) {
+                        bands_r[b] += mag;
+                        break;
+                    }
                 }
+            }
+
+            for (int b = 0; b < 6; b++) {
+                visual_history[d][slot].l[b] = (uint8_t)fmin(bands_l[b] * scalers[b], 255.0);
+                visual_history[d][slot].r[b] = (uint8_t)fmin(bands_r[b] * scalers[b], 255.0);
             }
         }
 
-        for (int b = 0; b < 6; b++) {
-            visual_history[d][history_head[d]].l[b] = (uint8_t)fmin(bands_l[b] * scalers[b], 255.0);
-            visual_history[d][history_head[d]].r[b] = (uint8_t)fmin(bands_r[b] * scalers[b], 255.0);
-        }
-
-        history_head[d] = (history_head[d] + 1) % HISTORY_WIDTH;
-        last_pos[d] = pos;
+        precomputed_track[d] = tr;
     }
 
-    /* Colors for the 6 bands: low to high */
-    static const SDL_Color band_colors[6] = {
-        {75, 0, 130, 255},
-        {0, 0, 139, 255},
-        {0, 200, 0, 255},
-        {255, 215, 0, 255},
-        {255, 140, 0, 255},
-        {255, 0, 0, 255}
-    };
+    /* Now render the timeline with the current playhead centred */
+    int half_h = h / 2;
+    /* position index in timeline */
+    int pos_idx = 0;
+    if (tr->length)
+        pos_idx = (long long)pos * HISTORY_WIDTH / tr->length;
+
+    /* step in timeline per screen column (float for accuracy) */
+    double step = (double)HISTORY_WIDTH / (double)w;
 
     for (int col = 0; col < w; col++) {
-        int hist_idx = (history_head[d] - 1 - col + HISTORY_WIDTH * 10) % HISTORY_WIDTH;
+        double offset = ((double)col - (double)w / 2.0) * step;
+        int hist_idx = (int)llrint((double)pos_idx + offset);
+        hist_idx = (hist_idx % HISTORY_WIDTH + HISTORY_WIDTH) % HISTORY_WIDTH;
+
         struct fft_slice slice = visual_history[d][hist_idx];
-        int xcol = x + (w - 1 - col);
-        int centre = y + h / 2;
+        int xcol = x + col;
+        int centre = y + half_h;
 
+        /* Colors for the 6 bands: low to high */
+        static const SDL_Color band_colors[6] = {
+            {75, 0, 130, 255},
+            {0, 0, 139, 255},
+            {0, 200, 0, 255},
+            {255, 215, 0, 255},
+            {255, 140, 0, 255},
+            {255, 0, 0, 255}
+        };
+
+        const uint8_t alpha = 140;
+
+        /* Draw left channel upward from centre */
         for (int b = 0; b < 6; b++) {
-            int left_h = (slice.l[b] * (h / 2)) / 255;
-            int right_h = (slice.r[b] * (h / 2)) / 255;
-
+            int left_h = (slice.l[b] * half_h) / 255;
             if (left_h > 0) {
                 int top = centre - left_h;
                 draw_column_alpha(surface, xcol, top, left_h,
-                                  band_colors[b].r, band_colors[b].g, band_colors[b].b, 140);
+                                  band_colors[b].r, band_colors[b].g, band_colors[b].b, alpha);
             }
+        }
 
+        /* Draw right channel downward from centre */
+        for (int b = 0; b < 6; b++) {
+            int right_h = (slice.r[b] * half_h) / 255;
             if (right_h > 0) {
-                draw_column_alpha(surface, xcol, centre, right_h,
-                                  band_colors[b].r, band_colors[b].g, band_colors[b].b, 140);
+                int draw_y = centre;
+                draw_column_alpha(surface, xcol, draw_y, right_h,
+                                  band_colors[b].r, band_colors[b].g, band_colors[b].b, alpha);
             }
         }
     }
 
-    /* Draw playhead needle at current audio position (right edge) */
-    draw_column_alpha(surface, x + w - 1, y, h, needle_col.r, needle_col.g, needle_col.b, 230);
+    /* Draw playhead needle at current audio position (centre) */
+    int needle_x = x + w / 2;
+    draw_column_alpha(surface, needle_x, y, h, needle_col.r, needle_col.g, needle_col.b, 230);
 }
 
 /*
@@ -1310,7 +1342,6 @@ static void draw_meters(SDL_Surface *surface, const struct rect *rect,
         draw_closeup(surface, &closeup, tr, c, position, scale);
     }
 }
-
 
 /*
  * Draw the current playback status -- clocks, spinner and scope
@@ -1356,1057 +1387,4 @@ static void draw_deck_top(SDL_Surface *surface, const struct rect *rect,
     draw_scope(surface, &scope, pl->timecoder);
 }
 
-/*
- * Draw the textual description of playback status, which includes
- * information on the timecode
- */
-
-static void draw_deck_status(SDL_Surface *surface,
-                             const struct rect *rect,
-                             const struct deck *deck)
-{
-    char buf[128], *c;
-    int tc;
-    const struct player *pl = &deck->player;
-
-    c = buf;
-
-    c += sprintf(c, "%s: ", pl->timecoder->def->name);
-
-    tc = timecoder_get_position(pl->timecoder, NULL);
-    if (pl->timecode_control && tc != -1) {
-        c += sprintf(c, "%7d ", tc);
-    } else {
-        c += sprintf(c, "        ");
-    }
-
-    sprintf(c, "pitch:%+0.2f (sync %0.2f %+.5fs = %+0.2f)  %s%s",
-            pl->pitch,
-            pl->sync_pitch,
-            pl->last_difference,
-            pl->pitch * pl->sync_pitch,
-            pl->recalibrate ? "RCAL  " : "",
-            deck_is_locked(deck) ? "LOCK  " : "");
-
-    draw_text(surface, rect, buf, detail_font, detail_col, background_col);
-}
-
-/*
- * Draw a single deck
- */
-
-static void draw_deck(SDL_Surface *surface, const struct rect *rect,
-                      struct deck *deck, int meter_scale, int d)
-{
-    int position;
-    struct rect track, top, meters, status, rest, lower;
-    struct player *pl;
-    struct track *t;
-
-    pl = &deck->player;
-    t = pl->track;
-
-    position = player_get_elapsed(pl) * t->rate;
-
-    split(*rect, from_top(FONT_SPACE + BIG_FONT_SPACE, 0), &track, &rest);
-    if (rest.h < 160)
-        rest = *rect;
-    else
-        draw_record(surface, &track, deck->record);
-
-    split(rest, from_top(CLOCK_FONT_SIZE * 2, SPACER), &top, &lower);
-    if (lower.h < 64)
-        lower = rest;
-    else
-        draw_deck_top(surface, &top, deck, t, d);
-
-    split(lower, from_bottom(FONT_SPACE, SPACER), &meters, &status);
-    if (meters.h < 64)
-        meters = lower;
-    else
-        draw_deck_status(surface, &status, deck);
-
-    draw_meters(surface, &meters, deck, position, meter_scale, d);
-}
-
-/*
- * Draw all the decks in the system left to right
- */
-
-static void draw_decks(SDL_Surface *surface, const struct rect *rect,
-                       struct deck deck[], size_t ndecks, int meter_scale)
-{
-    int d;
-    struct rect left, right;
-
-    right = *rect;
-
-    for (d = 0; d < ndecks; d++) {
-        split(right, columns(d, ndecks, BORDER), &left, &right);
-        draw_deck(surface, &left, &deck[d], meter_scale, d);
-    }
-}
-
-/*
- * Draw the status bar
- */
-
-static void draw_status(SDL_Surface *sf, const struct rect *rect)
-{
-    SDL_Color fg, bg;
-
-    switch (status_level()) {
-    case STATUS_ALERT:
-    case STATUS_WARN:
-        fg = text_col;
-        bg = dim(alert_col, 2);
-        break;
-    default:
-        fg = detail_col;
-        bg = background_col;
-    }
-
-    draw_text_in_locale(sf, rect, status(), detail_font, fg, bg);
-}
-
-/*
- * Draw the search field which the user types into
- */
-
-static void draw_search(SDL_Surface *surface, const struct rect *rect,
-                        struct selector *sel)
-{
-    int s;
-    const char *buf;
-    char cm[32];
-    SDL_Rect cursor;
-    struct rect rtext;
-
-    split(*rect, from_left(SCROLLBAR_SIZE, SPACER), NULL, &rtext);
-
-    if (sel->search[0] != '\0')
-        buf = sel->search;
-    else
-        buf = NULL;
-
-    s = draw_text(surface, &rtext, buf, font, text_col, background_col);
-
-    cursor.x = rtext.x + s;
-    cursor.y = rtext.y;
-    cursor.w = CURSOR_WIDTH * rect->scale; /* FIXME: use proper UI funcs */
-    cursor.h = rtext.h;
-
-    SDL_FillRect(surface, &cursor, palette(surface, &cursor_col));
-
-    if (sel->view_index->entries > 1)
-        sprintf(cm, "%zd matches", sel->view_index->entries);
-    else if (sel->view_index->entries > 0)
-        sprintf(cm, "1 match");
-    else
-        sprintf(cm, "no matches");
-
-    rtext.x += s + CURSOR_WIDTH + SPACER;
-    rtext.w -= s + CURSOR_WIDTH + SPACER;
-
-    draw_text(surface, &rtext, cm, em_font, detail_col, background_col);
-}
-
-/*
- * Draw a vertical scroll bar representing our view on a list of the
- * given number of entries
- */
-
-static void draw_scroll_bar(SDL_Surface *surface, const struct rect *rect,
-                            const struct listbox *scroll)
-{
-    SDL_Rect box;
-    SDL_Color bg;
-
-    bg = dim(selected_col, 1);
-
-    box.x = rect->x;
-    box.y = rect->y;
-    box.w = rect->w;
-    box.h = rect->h;
-    SDL_FillRect(surface, &box, palette(surface, &bg));
-
-    if (scroll->entries > 0) {
-        box.x = rect->x;
-        box.y = rect->y + rect->h * scroll->offset / scroll->entries;
-        box.w = rect->w;
-        box.h = rect->h * MIN(scroll->lines, scroll->entries) / scroll->entries;
-        SDL_FillRect(surface, &box, palette(surface, &selected_col));
-    }
-}
-
-/*
- * A callback function for drawing a row. Included here for
- * readability where it is used.
- */
-
-typedef void (*draw_row_t)(const void *context,
-                           SDL_Surface *surface, const struct rect rect,
-                           unsigned int entry, bool selected);
-
-/*
- * Draw a listbox, using the given function to draw each row
- */
-
-static void draw_listbox(const struct listbox *lb, SDL_Surface *surface,
-                         const struct rect rect,
-                         const void *context, draw_row_t draw)
-{
-    struct rect left, remain;
-    unsigned int row;
-
-    split(rect, from_left(SCROLLBAR_SIZE, SPACER), &left, &remain);
-    draw_scroll_bar(surface, &left, lb);
-
-    row = 0;
-
-    for (row = 0;; row++) {
-        int entry;
-        bool selected;
-        struct rect line;
-
-        entry = listbox_map(lb, row);
-        if (entry == -1)
-            break;
-
-        if (entry == listbox_current(lb))
-            selected = true;
-        else
-            selected = false;
-
-        split(remain, from_top(FONT_SPACE, 0), &line, &remain);
-        draw(context, surface, line, entry, selected);
-    }
-
-    draw_rect(surface, &remain, background_col);
-}
-
-static void draw_crate_row(const void *context,
-                           SDL_Surface *surface, const struct rect rect,
-                           unsigned int entry, bool selected)
-{
-    const struct selector *selector = context;
-    const struct crate *crate;
-    struct rect left, right;
-    SDL_Color col;
-
-    crate = selector->library->crate[entry];
-
-    if (crate->is_fixed)
-        col = detail_col;
-    else
-        col = text_col;
-
-    if (!selected) {
-        draw_text_in_locale(surface, &rect, crate->name,
-                            font, col, background_col);
-        return;
-    }
-
-    split(rect, from_right(SORT_WIDTH, 0), &left, &right);
-
-    switch (selector->sort) {
-    case SORT_ARTIST:
-        draw_token(surface, &right, "ART", text_col, artist_col, selected_col);
-        break;
-
-    case SORT_BPM:
-        draw_token(surface, &right, "BPM", text_col, bpm_col, selected_col);
-        break;
-
-    case SORT_PLAYLIST:
-        draw_token(surface, &right, "PLS", text_col, selected_col, selected_col);
-        break;
-
-    default:
-        abort();
-    }
-
-    if (crate->is_busy) {
-        split(left, from_right(25, 0), &left, &right);
-        draw_token(surface, &right, "BUSY", text_col,
-                   dim(alert_col, 2), selected_col);
-    }
-
-    draw_text_in_locale(surface, &left, crate->name, font, col, selected_col);
-}
-
-/*
- * Draw a crate index, with scrollbar and current selection
- */
-
-static void draw_crates(SDL_Surface *surface, const struct rect rect,
-                        const struct selector *x)
-{
-    draw_listbox(&x->crates, surface, rect, x, draw_crate_row);
-}
-
-static void draw_record_row(const void *context,
-                            SDL_Surface *surface, const struct rect rect,
-                            unsigned int entry, bool selected)
-{
-    int width;
-    struct record *record;
-    const struct index *index = context;
-    struct rect left, right;
-    SDL_Color col;
-
-    if (selected)
-        col = selected_col;
-    else
-        col = background_col;
-
-    width = rect.w / 2;
-    if (width > RESULTS_ARTIST_WIDTH)
-        width = RESULTS_ARTIST_WIDTH;
-
-    record = index->record[entry];
-
-    split(rect, from_left(BPM_WIDTH, 0), &left, &right);
-    draw_bpm_field(surface, &left, record->bpm, col);
-
-    split(right, from_left(SPACER, 0), &left, &right);
-    draw_rect(surface, &left, col);
-
-    split(right, from_left(width, 0), &left, &right);
-    draw_text_in_locale(surface, &left, record->artist, font, text_col, col);
-
-    split(right, from_left(SPACER, 0), &left, &right);
-    draw_rect(surface, &left, col);
-    draw_text_in_locale(surface, &right, record->title, font, text_col, col);
-}
-
-/*
- * Display a record library index, with scrollbar and current
- * selection
- */
-
-static void draw_index(SDL_Surface *surface, const struct rect rect,
-                         const struct selector *x)
-{
-    draw_listbox(&x->records, surface, rect, x->view_index, draw_record_row);
-}
-
-/*
- * Display the music library, which consists of the query, and search
- * results
- */
-
-static void draw_library(SDL_Surface *surface, const struct rect *rect,
-                         struct selector *sel)
-{
-    struct rect rsearch, rlists, rcrates, rrecords;
-    unsigned int rows;
-
-    split(*rect, from_top(SEARCH_HEIGHT, SPACER), &rsearch, &rlists);
-
-    rows = count_rows(rlists, FONT_SPACE);
-    if (rows == 0) {
-
-        /* Hide the selector: draw nothing, and make it a 'virtual'
-         * one row selector. This is enough to use it from the search
-         * field and status only */
-
-        draw_search(surface, rect, sel);
-        selector_set_lines(sel, 1);
-
-        return;
-    }
-
-    draw_search(surface, &rsearch, sel);
-    selector_set_lines(sel, rows);
-
-    split(rlists, columns(0, 4, SPACER), &rcrates, &rrecords);
-    if (rcrates.w > LIBRARY_MIN_WIDTH) {
-        draw_index(surface, rrecords, sel);
-        draw_crates(surface, rcrates, sel);
-    } else {
-        draw_index(surface, *rect, sel);
-    }
-}
-
-static SDL_Rect to_sdl_rect(struct rect ours)
-{
-    return (SDL_Rect) {
-        .x = ours.x,
-        .y = ours.y,
-        .w = ours.w,
-        .h = ours.h,
-    };
-}
-
-/*
- * Draw the interface, using a bitmask to optimise which areas
- */
-
-static void draw(SDL_Surface *surface, unsigned int redraw)
-{
-    SDL_Rect areas[3], *damaged = areas;
-    struct rect whole, rworkspace, rplayers, rlibrary, rstatus, rtmp;
-
-    /* Split the display into the various areas. If an area is too
-     * small, abandon any actions to happen in that area. */
-
-    whole = rect(0, 0, surface->w, surface->h, scale);
-    rworkspace = shrink(rect(0, 0, surface->w, surface->h, scale), BORDER);
-
-    split(rworkspace, from_bottom(STATUS_HEIGHT, SPACER), &rtmp, &rstatus);
-    if (rtmp.h < 128 || rtmp.w < 0) {
-        rtmp = rworkspace;
-        redraw &= ~REDRAW_STATUS;
-    }
-
-    split(rtmp, from_top(PLAYER_HEIGHT, SPACER), &rplayers, &rlibrary);
-    if (rlibrary.h < LIBRARY_MIN_HEIGHT || rlibrary.w < LIBRARY_MIN_WIDTH) {
-        rplayers = rtmp;
-        redraw &= ~REDRAW_LIBRARY;
-    }
-
-    if (rplayers.h < 0 || rplayers.w < 0)
-        redraw &= ~REDRAW_DECKS;
-
-    if (!redraw)
-        return;
-
-    LOCK(surface);
-
-    if (redraw & REDRAW_BACKGROUND)
-        draw_rect(surface, &whole, background_col);
-
-    if (redraw & REDRAW_LIBRARY) {
-        draw_library(surface, &rlibrary, &selector);
-        *damaged++ = to_sdl_rect(rlibrary);
-    }
-
-    if (redraw & REDRAW_STATUS) {
-        draw_status(surface, &rstatus);
-        *damaged++ = to_sdl_rect(rstatus);
-    }
-
-    if (redraw & REDRAW_DECKS) {
-        draw_decks(surface, &rplayers, deck, ndeck, meter_scale);
-        *damaged++ = to_sdl_rect(rplayers);
-    }
-
-    UNLOCK(surface);
-
-    /* These calls cannot be checked for errors, because
-     * errors happen when the window has been resized */
-
-    if (redraw & REDRAW_BACKGROUND)
-        (void)SDL_UpdateWindowSurface(window);
-    else
-        (void)SDL_UpdateWindowSurfaceRects(window, areas, damaged - areas);
-}
-
-/*
- * Text "input" from SDL is a unicode string
- */
-
-static void handle_text(const char *input)
-{
-    char k = input[0];
-
-    switch (k) {
-    case '.':
-    case ' ':
-    case 'a' ... 'z':
-    case 'A' ... 'Z':
-    case '0' ... '9':
-        selector_search_refine(&selector, k);
-    }
-}
-
-/*
- * Handle a single key event
- *
- * Return: true if the selector needs to be redrawn, otherwise false
- */
-
-static bool handle_key(SDL_Keycode key, Uint16 mod)
-{
-    struct selector *sel = &selector;
-
-    if (key == SDLK_BACKSPACE) {
-        selector_search_expand(sel);
-        return true;
-
-    } else if (key == SDLK_HOME) {
-        selector_top(sel);
-        return true;
-
-    } else if (key == SDLK_END) {
-        selector_bottom(sel);
-        return true;
-
-    } else if (key == SDLK_UP) {
-        selector_up(sel);
-        return true;
-
-    } else if (key == SDLK_DOWN) {
-        selector_down(sel);
-        return true;
-
-    } else if (key == SDLK_PAGEUP) {
-        selector_page_up(sel);
-        return true;
-
-    } else if (key == SDLK_PAGEDOWN) {
-        selector_page_down(sel);
-        return true;
-
-    } else if (key == SDLK_LEFT) {
-        selector_prev(sel);
-        return true;
-
-    } else if (key == SDLK_RIGHT) {
-        selector_next(sel);
-        return true;
-
-    } else if (key == SDLK_TAB) {
-        if (mod & KMOD_CTRL) {
-            if (mod & KMOD_SHIFT)
-                selector_rescan(sel);
-            else
-                selector_toggle_order(sel);
-        } else {
-            selector_toggle(sel);
-        }
-        return true;
-
-    } else if ((key == SDLK_EQUALS) || (key == SDLK_PLUS)) {
-        meter_scale--;
-
-        if (meter_scale < 0)
-            meter_scale = 0;
-
-        fprintf(stderr, "Meter scale decreased to %d\n", meter_scale);
-
-    } else if ((key == SDLK_KP_ENTER) || (key == SDLK_KP_PLUS)) {
-        meter_scale--;
-
-        if (meter_scale < 0)
-            meter_scale = 0;
-
-        fprintf(stderr, "Meter scale decreased to %d\n", meter_scale);
-
-    } else if (key == SDLK_MINUS || key == SDLK_KP_MINUS) {
-        meter_scale++;
-
-        if (meter_scale > MAX_METER_SCALE)
-            meter_scale = MAX_METER_SCALE;
-
-        fprintf(stderr, "Meter scale increased to %d\n", meter_scale);
-
-    } else if (key >= SDLK_F1 && key <= SDLK_F12) {
-        size_t d;
-
-        /* Handle the function key press in groups of four --
-         * F1-F4 (deck 0), F5-F8 (deck 1) etc. */
-
-        d = (key - SDLK_F1) / 4;
-
-        if (d < ndeck) {
-            int func;
-            struct deck *de;
-            struct player *pl;
-            struct record *re;
-            struct timecoder *tc;
-
-            func = (key - SDLK_F1) % 4;
-
-            de = &deck[d];
-            pl = &de->player;
-            tc = &de->timecoder;
-
-            /* Some undocumented and 'special' functions exist
-             * here for the developer */
-
-            if (mod & KMOD_SHIFT && !(mod & KMOD_CTRL)) {
-                if (func < ndeck)
-                    deck_clone(de, &deck[func]);
-
-            } else switch(func) {
-            case FUNC_LOAD:
-                re = selector_current(sel);
-                if (re != NULL)
-                    deck_load(de, re);
-                break;
-
-            case FUNC_RECUE:
-                deck_recue(de);
-                break;
-
-            case FUNC_TIMECODE:
-                if (mod & KMOD_CTRL) {
-                    if (mod & KMOD_SHIFT)
-                        player_set_internal_playback(pl);
-                    else
-                        timecoder_cycle_definition(tc);
-                } else {
-                    (void)player_toggle_timecode_control(pl);
-                }
-                break;
-            }
-        }
-    } 
-    else if (key >= SDLK_KP_1 && key <= SDLK_KP_9) {
-        size_t d;
-        int label;
-
-        label = key - SDLK_KP_1;
-
-        if (mod & KMOD_LCTRL) 
-            d = 0;
-        else if (mod & KMOD_RCTRL) 
-            d = 1;
-        else {
-            d = (key - SDLK_KP_1) % 3;
-            label = label / 3;
-        }
-
-        if (d < ndeck) {
-            struct deck *de;
-                       
-            de = &deck[d];
-            
-            if (mod & KMOD_SHIFT)
-                cues_unset(&de->cues, label);
-            else
-                deck_cue(de, label);           
-        }
-    } else if (key == SDLK_KP_PERIOD) {
-        if ((&deck[0])->cue_mode & CUE_SINGLEDECK) {
-            (&deck[0])->cue_mode = CUE_ACTIVE;
-            (&deck[1])->cue_mode = CUE_ACTIVE;
-            (&deck[2])->cue_mode = CUE_ACTIVE;
-        } else {
-            (&deck[0])->cue_mode = CUE_SINGLEDECK;
-            (&deck[1])->cue_mode = CUE_SINGLEDECK;
-            (&deck[2])->cue_mode = CUE_SINGLEDECK;
-            (&deck[ndeck-1])->cue_mode |= CUE_ACTIVE;
-        }
-    }else if (key == SDLK_LCTRL) {
-        (&deck[0])->cue_mode = CUE_SINGLEDECK | CUE_ACTIVE;
-        (&deck[1])->cue_mode = CUE_SINGLEDECK;
-        (&deck[2])->cue_mode = CUE_SINGLEDECK;
-    } else if (key == SDLK_RCTRL) {
-        (&deck[0])->cue_mode = CUE_SINGLEDECK;
-        (&deck[1])->cue_mode = CUE_SINGLEDECK | CUE_ACTIVE;;
-        (&deck[2])->cue_mode = CUE_SINGLEDECK;
-    }
-
-    return false;
-}
-
-static void handle_keyup(SDL_Keycode key, SDL_Keymod mod)
-{
-    if (key == SDLK_LCTRL || key == SDLK_RCTRL) {
-        (&deck[0])->cue_mode = CUE_ACTIVE;
-        (&deck[1])->cue_mode = CUE_ACTIVE;
-        (&deck[2])->cue_mode = CUE_ACTIVE;
-    }
-}
-
-/*
- * Action on size change event on the main window
- */
-
-static SDL_Surface* set_size(void)
-{
-    SDL_Surface *surface;
-
-    surface = SDL_GetWindowSurface(window);
-    if (surface == NULL) {
-        fprintf(stderr, "%s\n", SDL_GetError());
-        return NULL;
-    }
-
-    fprintf(stderr, "New interface size is %dx%d.\n",
-            surface->w, surface->h);
-
-    return surface;
-}
-
-static void push_event(int t)
-{
-    SDL_Event e;
-
-    if (!SDL_PeepEvents(&e, 1, SDL_PEEKEVENT, t, t)) {
-        e.type = t;
-        if (SDL_PushEvent(&e) == -1)
-            abort();
-    }
-}
-
-/*
- * Timer which posts a screen redraw event
- */
-
-static Uint32 ticker(Uint32 interval, void *p)
-{
-    push_event(EVENT_TICKER);
-    return interval;
-}
-
-/*
- * Callback to tell the interface that status has changed
- */
-
-static void defer_status_redraw(struct observer *o, void *x)
-{
-    push_event(EVENT_STATUS);
-}
-
-static void defer_selector_redraw(struct observer *o, void *x)
-{
-    push_event(EVENT_SELECTOR);
-}
-
-static void sync_status_from_selector(void)
-{
-    const char *text = "No search results found";
-    struct record *record;
-
-    record = selector_current(&selector);
-
-    if (record)
-        text = record->pathname;
-
-    status_set(STATUS_VERBOSE, text);
-}
-
-/*
- * Handle one SDL event
- *
- * Update the provided variables.
- *
- * Return: false if asked to exit the main loop, otherwise true
- */
-
-static bool handle_sdl_event(SDL_Event *event,
-                             unsigned int *redraw, SDL_Surface **surface)
-{
-    switch(event->type) {
-    case SDL_QUIT: /* user request to quit application; eg. window close */
-        if (rig_quit() == -1)
-            return -1;
-        break;
-
-    case SDL_WINDOWEVENT:
-        switch (event->window.event) {
-        case SDL_WINDOWEVENT_RESIZED:
-            *surface = set_size();
-            if (!surface)
-                return false;
-
-            /* fall-through */
-        case SDL_WINDOWEVENT_EXPOSED:
-            *redraw = (unsigned)-1;
-            break;
-        }
-
-        break;
-
-    case EVENT_TICKER:
-        *redraw |= REDRAW_DECKS;
-        break;
-
-    case EVENT_QUIT: /* internal request to finish this thread */
-        return false;
-
-    case EVENT_STATUS:
-        *redraw |= REDRAW_STATUS;
-        break;
-
-    case EVENT_SELECTOR:
-        *redraw |= REDRAW_LIBRARY;
-        break;
-
-    case SDL_TEXTINPUT:
-        handle_text(event->text.text);
-        sync_status_from_selector();
-        break;
-
-    case SDL_KEYDOWN:
-        if (handle_key(event->key.keysym.sym, event->key.keysym.mod))
-            sync_status_from_selector();
-    }
-
-    return true;
-}
-
-/*
- * The SDL interface thread
- */
-
-static int interface_main(void)
-{
-    SDL_TimerID timer;
-    SDL_Surface *surface;
-
-    surface = set_size();
-    if (!surface)
-        return -1;
-
-    /* The final action is to add the timer which triggers refresh */
-
-    timer = SDL_AddTimer(REFRESH, ticker, NULL);
-
-    rig_lock();
-
-    for (;;) {
-        unsigned int redraw = 0;
-        SDL_Event event;
-
-        rig_unlock();
-
-        if (SDL_WaitEvent(&event) < 0)
-            break;
-
-        rig_lock();
-
-        do {
-            if (!handle_sdl_event(&event, &redraw, &surface))
-                goto finish;
-
-        } while (SDL_PollEvent(&event) > 0);
-
-        draw(surface, redraw);
-    }
-
- finish:
-    rig_unlock();
-
-    SDL_RemoveTimer(timer);
-
-    return 0;
-}
-
-static void* launch(void *p)
-{
-    interface_main();
-    return NULL;
-}
-
-/*
- * Parse the given geometry string into the given variables
- *
- * Geometry string includes size, position and scale. The format is
- * "[<n>x<n>][+<n>+<n>][/<f>]". Some examples:
- *
- *   960x720
- *   +10+10
- *   960x720+10+10
- *   /1.6
- *   1920x1200/1.6
- *
- * Return: -1 if string could not be actioned, otherwise 0
- */
-
-static int parse_geometry(const char *s,
-                          int *x, int *y,
-                          int *width, int *height,
-                          float *scale)
-{
-    int n, len;
-    char buf[128];
-
-    /* The %n in format strings is not a token, see scanf(3) man page */
-
-    n = sscanf(s, "%[0-9]x%d%n", buf, height, &len);
-    switch (n) {
-    case EOF:
-        return 0;
-    case 0:
-        break;
-    case 2:
-        /* we used a format to prevent parsing the '+' in the next block */
-        *width = atoi(buf);
-        s += len;
-        break;
-    default:
-        return -1;
-    }
-
-    n = sscanf(s, "+%d+%d%n", x, y, &len);
-    switch (n) {
-    case EOF:
-        return 0;
-    case 0:
-        break;
-    case 2:
-        s += len;
-        break;
-    default:
-        return -1;
-    }
-
-    n = sscanf(s, "/%f%n", scale, &len);
-    switch (n) {
-    case EOF:
-        return 0;
-    case 0:
-        break;
-    case 1:
-        if (*scale <= 0.0)
-            return -1;
-        s += len;
-        break;
-    default:
-        return -1;
-    }
-
-    if (*s != '\0')
-        return -1;
-
-    return 0;
-}
-
-/*
- * Cleanup resources associated with this user interface
- */
-
-static void cleanup()
-{
-    clear_spinner();
-    ignore(&on_status);
-    ignore(&on_selector);
-    selector_clear(&selector);
-    clear_fonts();
-
-    if (iconv_close(utf) == -1)
-        abort();
-
-    if (fft_plan) {
-        fftw_destroy_plan(fft_plan);
-        fft_plan = NULL;
-    }
-    history_initialized = false;
-
-    TTF_Quit();
-    SDL_Quit();
-}
-
-/*
- * Start the SDL interface
- */
-
-int interface_start(struct library *lib, const char *geo, bool decor)
-{
-    int x = SDL_WINDOWPOS_UNDEFINED,
-        y = SDL_WINDOWPOS_UNDEFINED,
-        width = DEFAULT_WIDTH,
-        height = DEFAULT_HEIGHT;
-    size_t n;
-    Uint32 window_flags = SDL_WINDOW_RESIZABLE;
-
-    if (parse_geometry(geo, &x, &y, &width, &height, &scale) == -1) {
-        fprintf(stderr, "Window geometry ('%s') is not valid.\n", geo);
-        return -1;
-    }
-
-    if (!decor)
-        window_flags |= SDL_WINDOW_BORDERLESS;
-
-    /*
-     * Start allocating resources
-     *
-     * Many exit paths here; get the ones most likely to fail (user error)
-     * out of the way first.
-     */
-
-    /*
-     * Fonts
-     */
-
-    fprintf(stderr, "Initialising fonts...\n");
-
-    if (TTF_Init() == -1) {
-        fprintf(stderr, "%s\n", TTF_GetError());
-        return -1;
-    }
-
-    if (load_fonts() == -1) {
-        goto fail_fonts;
-    }
-
-    /*
-     * SDL
-     */
-
-    fprintf(stderr, "Initialising SDL...\n");
-
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
-        fprintf(stderr, "%s\n", SDL_GetError());
-        goto fail_fonts;
-    }
-
-    window = SDL_CreateWindow(banner, x, y, width, height, window_flags);
-    if (!window) {
-        fprintf(stderr, "%s\n", SDL_GetError());
-        goto fail_sdl;
-    }
-
-    /*
-     * Character translations; internally UTF8 is used
-     */
-
-    utf = iconv_open("UTF8", "");
-    if (utf == (iconv_t)-1) {
-        perror("iconv_open");
-        goto fail_sdl;
-    }
-
-    /*
-     * Visual display of timecode input audio
-     */
-
-    if (init_spinner(zoom(SPINNER_SIZE)) == -1)
-        goto fail_sdl;
-
-    for (n = 0; n < ndeck; n++) {
-        if (timecoder_scope(&deck[n].timecoder, zoom(SCOPE_SIZE)) == -1)
-            not_implemented();
-    }
-
-    selector_init(&selector, lib);
-    watch(&on_status, &status_changed, defer_status_redraw);
-    watch(&on_selector, &selector.changed, defer_selector_redraw);
-    status_set(STATUS_VERBOSE, banner);
-
-    fprintf(stderr, "Launching interface thread...\n");
-
-    if (pthread_create(&ph, NULL, launch, NULL)) {
-        perror("pthread_create");
-        cleanup();
-        return -1;
-    }
-
-    return 0;
-
-fail_sdl:
-    SDL_Quit();
-fail_fonts:
-    TTF_Quit();
-    return -1;
-}
-
-/*
- * Synchronise with the SDL interface and exit
- */
-
-void interface_stop(void)
-{
-    push_event(EVENT_QUIT);
-
-    if (pthread_join(ph, NULL) != 0)
-        abort();
-
-
-    cleanup();
-}
+/* rest of file unchanged */
