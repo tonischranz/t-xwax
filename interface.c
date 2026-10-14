@@ -1313,7 +1313,8 @@ static void draw_fft_scrolling_history(SDL_Surface *surface, struct player *play
     for (int col = 0; col < w; col++) {
         double offset = ((double)col - (double)w / 2.0) * step;
         int hist_idx = (int)llrint((double)pos_idx + offset);
-        hist_idx = (hist_idx % HISTORY_WIDTH + HISTORY_WIDTH) % HISTORY_WIDTH;
+        if (hist_idx < 0 || hist_idx >= HISTORY_WIDTH)
+            continue;
 
         struct fft_slice slice;
         /* copy slice under mutex to avoid races with precompute thread */
