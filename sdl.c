@@ -52,7 +52,7 @@ struct sdl {
     SDL_AudioDeviceID monitor_dev;
     unsigned int rate;
     bool started;
-    atomic_bool monitor_enabled;
+    atomic_int monitor_mode;
     struct sdl_fifo fifo;
     struct sdl_fifo monitor_fifo;
 };
@@ -152,11 +152,12 @@ static void playback_callback(void *userdata, Uint8 *stream, int len)
     size_t remain = playback_frames;
     while (remain > 0) {
         size_t block = (remain < MAX_BLOCK) ? remain : MAX_BLOCK;
+        int monitor_mode;
 
         device_collect(dv, pcm_out, block);
 
-        if (sdl->monitor_dev > 0 &&
-            atomic_load_explicit(&sdl->monitor_enabled, memory_order_relaxed)) {
+        monitor_mode = atomic_load_explicit(&sdl->monitor_mode, memory_order_relaxed);
+        if (sdl->monitor_dev > 0 && monitor_mode != DEVICE_MONITOR_OFF) {
             size_t head = atomic_load_explicit(&sdl->monitor_fifo.head,
                                                memory_order_relaxed);
             size_t tail = atomic_load_explicit(&sdl->monitor_fifo.tail,
@@ -176,6 +177,9 @@ static void playback_callback(void *userdata, Uint8 *stream, int len)
                                   memory_order_release);
         }
 
+        if (monitor_mode == DEVICE_MONITOR_ONLY)
+            memset(pcm_out, 0, block * DEVICE_CHANNELS * sizeof(*pcm_out));
+
         pcm_out += block * DEVICE_CHANNELS;
         remain -= block;
     }
@@ -193,7 +197,8 @@ static void monitor_callback(void *userdata, Uint8 *stream, int len)
     size_t head = atomic_load_explicit(&sdl->monitor_fifo.head, memory_order_acquire);
     size_t tail = atomic_load_explicit(&sdl->monitor_fifo.tail, memory_order_relaxed);
 
-    if (!atomic_load_explicit(&sdl->monitor_enabled, memory_order_relaxed)) {
+    if (atomic_load_explicit(&sdl->monitor_mode, memory_order_relaxed) ==
+        DEVICE_MONITOR_OFF) {
         atomic_store_explicit(&sdl->monitor_fifo.tail, head, memory_order_release);
         return;
     }
@@ -219,15 +224,16 @@ static unsigned int sample_rate(struct device *dv)
 static int toggle_monitor(struct device *dv)
 {
     struct sdl *sdl = (struct sdl*)dv->local;
-    bool enabled;
+    int mode;
 
     if (sdl->monitor_dev == 0)
         return -1;
 
-    enabled = !atomic_load_explicit(&sdl->monitor_enabled, memory_order_relaxed);
-    atomic_store_explicit(&sdl->monitor_enabled, enabled, memory_order_relaxed);
+    mode = atomic_load_explicit(&sdl->monitor_mode, memory_order_relaxed);
+    mode = (mode + 1) % (DEVICE_MONITOR_WITH_PLAYBACK + 1);
+    atomic_store_explicit(&sdl->monitor_mode, mode, memory_order_relaxed);
 
-    return enabled;
+    return mode;
 }
 
 static void start(struct device *dv)
@@ -419,7 +425,7 @@ int sdl_init(struct device *dv, const char *name, unsigned int rate,
         return -1;
     }
 
-    atomic_init(&sdl->monitor_enabled, false);
+    atomic_init(&sdl->monitor_mode, DEVICE_MONITOR_OFF);
 
     SDL_zero(desired);
     desired.freq = rate ? rate : DEFAULT_RATE;

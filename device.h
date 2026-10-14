@@ -26,6 +26,12 @@
 
 #define DEVICE_CHANNELS 2
 
+enum device_monitor_mode {
+    DEVICE_MONITOR_OFF,
+    DEVICE_MONITOR_ONLY,
+    DEVICE_MONITOR_WITH_PLAYBACK
+};
+
 struct device {
     bool fault;
     void *local;

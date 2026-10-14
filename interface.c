@@ -1749,10 +1749,13 @@ static bool handle_key(SDL_Keycode key, Uint16 mod)
 
             case FUNC_MONITOR:
                 {
-                    int enabled = device_toggle_monitor(&de->device);
-                    if (enabled >= 0)
-                        status_printf(STATUS_INFO, "Deck %zu monitor %s",
-                                      d + 1, enabled ? "on" : "off");
+                    int mode = device_toggle_monitor(&de->device);
+                    if (mode == DEVICE_MONITOR_OFF)
+                        status_printf(STATUS_INFO, "Deck %zu monitor off", d + 1);
+                    else if (mode == DEVICE_MONITOR_ONLY)
+                        status_printf(STATUS_INFO, "Deck %zu monitor only", d + 1);
+                    else if (mode == DEVICE_MONITOR_WITH_PLAYBACK)
+                        status_printf(STATUS_INFO, "Deck %zu playback and monitor on", d + 1);
                 }
                 break;
             }
